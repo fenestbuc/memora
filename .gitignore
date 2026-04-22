@@ -1,0 +1,36 @@
+# Environment
+.env
+*.env
+
+# Database
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+memora_queue_*.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Workspace data (user-generated)
+.second-brain/
+sessions/
+wiki/
+memory/
+reports/
+
+# macOS
+.DS_Store
