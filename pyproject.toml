@@ -3,13 +3,13 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "memora"
+name = "hermes-rag-memory"
 version = "0.1.0"
-description = "Persistent semantic memory for AI agents"
+description = "Persistent semantic memory plugin for Hermes AI agents"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
-    {name = "Memora Contributors", email = "hello@memora.dev"},
+    {name = "Hermes RAG Memory Contributors", email = "hello@kubar.tech"},
 ]
 requires-python = ">=3.10"
 classifiers = [
@@ -28,8 +28,8 @@ classifiers = [
 dev = ["pytest>=8.0", "black", "ruff"]
 
 [project.scripts]
-memora-nightly = "memora.nightly_brain:main"
-memora-weekly = "memora.weekly_digest:main"
+hermes-rag-memory-nightly = "memora.nightly_brain:main"
+hermes-rag-memory-weekly = "memora.weekly_digest:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

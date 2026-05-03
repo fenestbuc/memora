@@ -160,7 +160,15 @@ class HermesRagMemoryProvider(MemoryProvider):
         self._session_id = session_id
         self._hermes_home = kwargs.get("hermes_home", str(Path.home() / ".hermes"))
         self._agent_identity = kwargs.get("agent_identity", "default")
+        self._config = kwargs.get("config", {})
         Path(self._hermes_home).mkdir(parents=True, exist_ok=True)
+
+        # Local memory directory (mirrors RAG writes to markdown files)
+        self._memory_dir = Path(self._config.get("memory_dir", str(Path.home() / "hermes-workspace" / "memory")))
+        self._memory_dir.mkdir(parents=True, exist_ok=True)
+
+        # Auto-ingest flag gates sync_turn
+        self._auto_ingest = self._config.get("auto_ingest", True)
 
         # SQLite write-behind queue — scoped by agent identity
         self._queue_path = Path(self._hermes_home) / f"rag_memory_queue_{self._agent_identity}.db"
@@ -267,6 +275,8 @@ class HermesRagMemoryProvider(MemoryProvider):
         pass
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+        if not self._auto_ingest:
+            return
         # Lightweight: queue both messages for later batch processing
         self._queue_add("memory", f"User: {user_content[:500]}")
         self._queue_add("memory", f"Assistant: {assistant_content[:500]}")
@@ -382,6 +392,13 @@ class HermesRagMemoryProvider(MemoryProvider):
                 "required": False,
                 "default": True,
             },
+            {
+                "key": "memory_dir",
+                "description": "Local markdown memory directory (mirrors RAG writes)",
+                "secret": False,
+                "required": False,
+                "default": str(Path.home() / "hermes-workspace" / "memory"),
+            },
         ]
 
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
@@ -421,6 +438,32 @@ class HermesRagMemoryProvider(MemoryProvider):
             )
             conn.commit()
             conn.close()
+            # Mirror to local markdown memory
+            self._write_local_memory(category, content)
+
+    def _write_local_memory(self, category: str, content: str) -> None:
+        """Append a fact to the local markdown memory file (e.g. memory/business.md)."""
+        try:
+            self._memory_dir.mkdir(parents=True, exist_ok=True)
+            safe_category = re.sub(r"[^a-zA-Z0-9_-]", "_", category).lower()
+            file_path = self._memory_dir / f"{safe_category}.md"
+
+            # Ensure file has a header if new
+            if not file_path.exists():
+                file_path.write_text(f"# {category.title()} Context\n\n")
+
+            # Append under current session heading
+            session_heading = f"## From session {self._session_id or 'unknown'}\n\n"
+            bullet = f"- {content.strip().replace(chr(10), ' ')}\n"
+
+            with open(file_path, "a", encoding="utf-8") as f:
+                # Only add session heading if file doesn't already end with it
+                current_text = file_path.read_text(encoding="utf-8")
+                if session_heading.strip() not in current_text[-2000:]:
+                    f.write("\n" + session_heading)
+                f.write(bullet + "\n")
+        except Exception as e:
+            logger.debug("Local memory write failed: %s", e)
 
     def _flush_queue(self, chunk_size: int = 100) -> None:
         with self._lock:

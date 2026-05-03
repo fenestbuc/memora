@@ -24,6 +24,95 @@ sys.path.insert(0, str(Path.home() / ".hermes" / "plugins" / "hermes-rag-memory"
 from __init__ import HermesRagMemoryProvider
 
 
+class TestLocalMemoryMirror(unittest.TestCase):
+    """Local markdown memory should mirror RAG writes."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.memdir = Path(self.tmpdir) / "memory"
+        self.provider = HermesRagMemoryProvider()
+        self.provider._hermes_home = self.tmpdir
+        self.provider._agent_identity = "test"
+        self.provider._session_id = "test_session_001"
+        self.provider._queue_path = Path(self.tmpdir) / "test_queue.db"
+        self.provider._memory_dir = self.memdir
+        self.provider._init_queue()
+        self.provider._lock = threading.Lock()
+        self.provider._seen_hashes = set()
+        self.provider._circuit_open = False
+        self.provider._consecutive_failures = 0
+        self.provider._circuit_open_until = 0.0
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_local_memory_file_created(self):
+        """Queueing a fact should create the corresponding .md file."""
+        self.provider._queue_add("business", "NavDhan fee is 1.25% on disbursals.")
+        file_path = self.memdir / "business.md"
+        self.assertTrue(file_path.exists())
+        content = file_path.read_text()
+        self.assertIn("NavDhan fee is 1.25% on disbursals.", content)
+        self.assertIn("test_session_001", content)
+
+    def test_local_memory_appends(self):
+        """Multiple facts should append to the same file."""
+        self.provider._queue_add("business", "Fact number one for business context.")
+        self.provider._queue_add("business", "Fact number two for business context.")
+        file_path = self.memdir / "business.md"
+        content = file_path.read_text()
+        self.assertEqual(content.count("Fact number one for business context."), 1)
+        self.assertEqual(content.count("Fact number two for business context."), 1)
+
+    def test_local_memory_category_mapping(self):
+        """Category should map to safe filename."""
+        self.provider._queue_add("user preferences", "User prefers dark mode for dashboards.")
+        file_path = self.memdir / "user_preferences.md"
+        self.assertTrue(file_path.exists())
+
+
+class TestAutoIngestGate(unittest.TestCase):
+    """sync_turn should be gated by auto_ingest config."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.provider = HermesRagMemoryProvider()
+        self.provider._hermes_home = self.tmpdir
+        self.provider._agent_identity = "test"
+        self.provider._session_id = "test_session"
+        self.provider._queue_path = Path(self.tmpdir) / "test_queue.db"
+        self.provider._memory_dir = Path(self.tmpdir) / "memory"
+        self.provider._init_queue()
+        self.provider._lock = threading.Lock()
+        self.provider._seen_hashes = set()
+        self.provider._circuit_open = False
+        self.provider._consecutive_failures = 0
+        self.provider._circuit_open_until = 0.0
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_sync_turn_queued_when_auto_ingest_true(self):
+        """sync_turn should queue when auto_ingest is True."""
+        self.provider._auto_ingest = True
+        self.provider.sync_turn("Hello", "Hi there")
+        conn = sqlite3.connect(self.provider._queue_path)
+        count = conn.execute("SELECT COUNT(*) FROM queue").fetchone()[0]
+        conn.close()
+        self.assertGreater(count, 0)
+
+    def test_sync_turn_skipped_when_auto_ingest_false(self):
+        """sync_turn should not queue when auto_ingest is False."""
+        self.provider._auto_ingest = False
+        self.provider.sync_turn("Hello", "Hi there")
+        conn = sqlite3.connect(self.provider._queue_path)
+        count = conn.execute("SELECT COUNT(*) FROM queue").fetchone()[0]
+        conn.close()
+        self.assertEqual(count, 0)
+
+
 class TestIsAvailable(unittest.TestCase):
     """P0 Bug: is_available() returns True with placeholder token."""
 

@@ -1,8 +1,8 @@
-# Memora
+# Hermes RAG Memory
 
 > Give your AI assistant a memory that persists across sessions.
 
-Memora is a **second-brain plugin** for [Hermes](https://github.com/hermes-ai) agents.
+Hermes RAG Memory is a **second-brain plugin** for [Hermes](https://github.com/hermes-ai) agents.
 It bridges your AI to a Cloudflare Workers RAG backend, storing every important fact,
 preference, and decision so your agent remembers context days, weeks, or months later.
 
@@ -22,7 +22,7 @@ starts from zero. You waste time re-explaining:
 - Product decisions and the reasoning behind them
 - Team context, roles, and priorities
 
-**Memora solves this.** Every conversation enriches a persistent knowledge graph
+**Hermes RAG Memory solves this.** Every conversation enriches a persistent knowledge graph
 that your agent can search, reference, and reason over. The result: your AI
 co-founder actually *knows* your business.
 
@@ -36,6 +36,8 @@ Key capabilities:
   projects, and concepts, creating a living knowledge base.
 - **Background Sync** — Facts are batched and synced automatically; no manual
   tagging needed.
+- **Local Memory Mirror** — All facts are also written to local markdown files
+  (e.g. `memory/business.md`) for human readability and git versioning.
 
 ---
 
@@ -49,17 +51,17 @@ npx wrangler deploy
 # Note the deployed URL and set an AUTH_TOKEN secret
 ```
 
-### 2. Install Memora
+### 2. Install Hermes RAG Memory
 
 ```bash
-git clone https://github.com/yourusername/memora.git
-pip install -e memora/
+git clone https://github.com/fenestbuc/hermes-rag-memory.git
+pip install -e hermes-rag-memory/
 ```
 
 ### 3. Configure
 
 ```bash
-cp memora/config/example.env .env
+cp hermes-rag-memory/config/example.env .env
 # Edit .env with your worker URL and token
 export $(cat .env | xargs)
 ```
@@ -70,14 +72,14 @@ Edit your Hermes `config.yaml`:
 
 ```yaml
 memory:
-  provider: memora
+  provider: hermes-rag-memory
 ```
 
 ### 5. Schedule Nightly Maintenance
 
 ```bash
 # Add to crontab for daily indexing
-0 2 * * * cd ~/memora-workspace && python -m memora.nightly_brain
+0 2 * * * cd ~/hermes-workspace && python -m memora.nightly_brain
 ```
 
 ---
@@ -88,14 +90,16 @@ memory:
 Hermes Agent
     |
     v
-MemoraProvider (SQLite write-behind queue)
+HermesRagMemoryProvider (SQLite write-behind queue + local .md mirror)
     |
     +--> Batch flush --> Cloudflare Workers RAG Backend
     |                      (Vectorize + D1 + BGE-M3)
     |
+    +--> Local markdown memory/*.md files
+    |
     +--> Nightly brain indexer
     |      +-- scan_workspace (mtime-aware hashing)
-    |      +-- wiki_ingester (entity extraction → markdown)
+    |      +-- wiki_ingester (entity extraction -> markdown)
     |      +-- conflict_detector (contradiction detection)
     |
     +--> Semantic recall <-- prefetch() before every turn
@@ -116,14 +120,14 @@ MemoraProvider (SQLite write-behind queue)
 ## Project Structure
 
 ```
-memora/
+hermes-rag-memory/
 |-- src/memora/
 |   |-- plugin.py          # Hermes MemoryProvider implementation
 |   |-- brain_indexer.py   # Workspace manifest + session indexer
-|   |-- wiki_ingester.py   # Session → markdown wiki generator
+|   |-- wiki_ingester.py   # Session -> markdown wiki generator
 |   |-- conflict_detector.py  # Contradiction detection
 |   |-- nightly_brain.py   # Scheduled maintenance runner
-|-- tests/                 # 58 tests, TDD approach
+|-- tests/                 # 23+ tests, TDD approach
 |-- config/
 |   |-- example.env        # Template for env vars
 |-- docs/
@@ -135,7 +139,7 @@ memora/
 ## Development
 
 ```bash
-cd memora
+cd hermes-rag-memory
 python -m pytest tests/ -v      # run all tests
 python -m memora.nightly_brain  # run maintenance manually
 ```
