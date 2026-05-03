@@ -170,6 +170,9 @@ class HermesRagMemoryProvider(MemoryProvider):
         # Auto-ingest flag gates sync_turn
         self._auto_ingest = self._config.get("auto_ingest", True)
 
+        # Prefetch relevance threshold (P2: configurable)
+        self._prefetch_threshold = self._config.get("prefetch_threshold", 0.5)
+
         # SQLite write-behind queue — scoped by agent identity
         self._queue_path = Path(self._hermes_home) / f"rag_memory_queue_{self._agent_identity}.db"
         self._init_queue()
@@ -184,6 +187,16 @@ class HermesRagMemoryProvider(MemoryProvider):
         self._consecutive_failures = 0
         self._circuit_open = False
         self._circuit_open_until = 0.0
+
+        # Metrics counters (P2: observability)
+        self._metrics = {
+            "facts_queued": 0,
+            "facts_flushed": 0,
+            "facts_failed": 0,
+            "prefetch_calls": 0,
+            "search_calls": 0,
+            "circuit_opens": 0,
+        }
 
         self._init_queue()
         self._load_seen_hashes()
@@ -256,6 +269,7 @@ class HermesRagMemoryProvider(MemoryProvider):
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
+        self._metrics["prefetch_calls"] += 1
         try:
             result = self._request("/search", {"query": query, "top_k": 8})
             results = result.get("results", [])
@@ -264,8 +278,11 @@ class HermesRagMemoryProvider(MemoryProvider):
             lines = ["## Relevant memories from past sessions:"]
             for r in results:
                 score = r.get("rerank_score", r.get("vector_score", 0))
-                if score > 0.5:
-                    lines.append(f"- {r.get('text', '')}")
+                if score > self._prefetch_threshold:
+                    cat = r.get("metadata", {}).get("category", "memory")
+                    created = r.get("metadata", {}).get("created_at", "")
+                    date_tag = f" [{created[:10]}]" if created else ""
+                    lines.append(f"- [{cat}]{date_tag} {r.get('text', '')}")
             return "\n".join(lines) if len(lines) > 1 else ""
         except Exception as e:
             logger.debug("prefetch failed: %s", e)
@@ -307,6 +324,8 @@ class HermesRagMemoryProvider(MemoryProvider):
         path, body = action_map[tool_name]()
         try:
             result = self._request(path, body, method="GET" if body is None else "POST")
+            if tool_name == "rag_memory_search":
+                self._metrics["search_calls"] += 1
             return json.dumps(result)
         except Exception as e:
             return json.dumps({"error": str(e)})
@@ -315,6 +334,11 @@ class HermesRagMemoryProvider(MemoryProvider):
         self._stop_background_flush()
         self._flush_queue()
         self._vacuum_queue()
+        logger.info("HermesRagMemoryProvider shutdown. Metrics: %s", self._metrics)
+
+    def get_metrics(self) -> Dict[str, int]:
+        """Return current metrics counters."""
+        return dict(self._metrics)
 
     def _start_background_flush(self, interval_sec: float = 60.0) -> None:
         """Start a background thread that flushes the queue periodically."""
@@ -399,6 +423,13 @@ class HermesRagMemoryProvider(MemoryProvider):
                 "required": False,
                 "default": str(Path.home() / "hermes-workspace" / "memory"),
             },
+            {
+                "key": "prefetch_threshold",
+                "description": "Minimum relevance score (0-1) for prefetched memories",
+                "secret": False,
+                "required": False,
+                "default": 0.5,
+            },
         ]
 
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
@@ -438,6 +469,7 @@ class HermesRagMemoryProvider(MemoryProvider):
             )
             conn.commit()
             conn.close()
+            self._metrics["facts_queued"] += 1
             # Mirror to local markdown memory
             self._write_local_memory(category, content)
 
@@ -512,6 +544,7 @@ class HermesRagMemoryProvider(MemoryProvider):
                             ids_to_delete.append(row_id)
                         except Exception as e:
                             logger.debug("Failed to flush queue item %s: %s", row_id, e)
+                            self._metrics["facts_failed"] += 1
                             conn.execute(
                                 """INSERT INTO failed_queue
                                    (action, category, content, source_session, source_file, created_at, failed_at, error)
@@ -530,6 +563,7 @@ class HermesRagMemoryProvider(MemoryProvider):
                 conn.execute(f"DELETE FROM queue WHERE id IN ({placeholders})", ids_to_delete)
                 conn.commit()
             conn.close()
+            self._metrics["facts_flushed"] += len(ids_to_delete)
 
     def _extract_facts(self, messages: List[Dict[str, Any]]) -> None:
         """Extract preference-like messages and key decisions from conversation.
@@ -625,6 +659,7 @@ class HermesRagMemoryProvider(MemoryProvider):
                     if self._consecutive_failures >= 3:
                         self._circuit_open = True
                         self._circuit_open_until = time.time() + 60.0
+                        self._metrics["circuit_opens"] += 1
                         logger.warning("RAG worker circuit breaker opened after %d failures", self._consecutive_failures)
                     raise
 
@@ -638,6 +673,7 @@ class HermesRagMemoryProvider(MemoryProvider):
                 if self._consecutive_failures >= 3:
                     self._circuit_open = True
                     self._circuit_open_until = time.time() + 60.0
+                    self._metrics["circuit_opens"] += 1
                 raise
 
         # Should never reach here, but satisfy type checker

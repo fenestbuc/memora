@@ -17,11 +17,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-# Add the installed plugin dir to path so we can import it
+# Add the plugin dir to path so we can import it
 import sys
-sys.path.insert(0, str(Path.home() / ".hermes" / "plugins" / "hermes-rag-memory"))
+# Plugin is at src/memora/plugin.py, pythonpath=["src"] in pyproject.toml
 
-from __init__ import HermesRagMemoryProvider
+from memora.plugin import HermesRagMemoryProvider
 
 
 class TestLocalMemoryMirror(unittest.TestCase):
@@ -42,6 +42,14 @@ class TestLocalMemoryMirror(unittest.TestCase):
         self.provider._circuit_open = False
         self.provider._consecutive_failures = 0
         self.provider._circuit_open_until = 0.0
+        self.provider._metrics = {
+            "facts_queued": 0,
+            "facts_flushed": 0,
+            "facts_failed": 0,
+            "search_calls": 0,
+            "prefetch_calls": 0,
+            "circuit_opens": 0,
+        }
 
     def tearDown(self):
         import shutil
@@ -89,6 +97,14 @@ class TestAutoIngestGate(unittest.TestCase):
         self.provider._circuit_open = False
         self.provider._consecutive_failures = 0
         self.provider._circuit_open_until = 0.0
+        self.provider._metrics = {
+            "facts_queued": 0,
+            "facts_flushed": 0,
+            "facts_failed": 0,
+            "search_calls": 0,
+            "prefetch_calls": 0,
+            "circuit_opens": 0,
+        }
 
     def tearDown(self):
         import shutil
@@ -157,6 +173,14 @@ class TestQueueDedup(unittest.TestCase):
         self.provider._circuit_open = False
         self.provider._consecutive_failures = 0
         self.provider._circuit_open_until = 0.0
+        self.provider._metrics = {
+            "facts_queued": 0,
+            "facts_flushed": 0,
+            "facts_failed": 0,
+            "search_calls": 0,
+            "prefetch_calls": 0,
+            "circuit_opens": 0,
+        }
 
     def tearDown(self):
         import shutil
@@ -210,12 +234,20 @@ class TestFlushQueue(unittest.TestCase):
         self.provider._circuit_open_until = 0.0
         self.provider._base_url = "https://test.example.com"
         self.provider._token = "test_token"
+        self.provider._metrics = {
+            "facts_queued": 0,
+            "facts_flushed": 0,
+            "facts_failed": 0,
+            "search_calls": 0,
+            "prefetch_calls": 0,
+            "circuit_opens": 0,
+        }
 
     def tearDown(self):
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    @patch("__init__.urllib.request.urlopen")
+    @patch("memora.plugin.urllib.request.urlopen")
     def test_failed_items_move_to_failed_queue(self, mock_urlopen):
         """When individual add fails, item should move to failed_queue and be deleted from queue."""
         mock_urlopen.side_effect = Exception("Network error")
@@ -232,7 +264,7 @@ class TestFlushQueue(unittest.TestCase):
         self.assertEqual(queue_count, 0)
         self.assertEqual(failed_count, 1)
 
-    @patch("__init__.urllib.request.urlopen")
+    @patch("memora.plugin.urllib.request.urlopen")
     def test_chunked_flush(self, mock_urlopen):
         """Large queues should be flushed in chunks of 100."""
         call_count = [0]
@@ -270,6 +302,14 @@ class TestExtractFacts(unittest.TestCase):
         self.provider._circuit_open = False
         self.provider._consecutive_failures = 0
         self.provider._circuit_open_until = 0.0
+        self.provider._metrics = {
+            "facts_queued": 0,
+            "facts_flushed": 0,
+            "facts_failed": 0,
+            "search_calls": 0,
+            "prefetch_calls": 0,
+            "circuit_opens": 0,
+        }
 
     def tearDown(self):
         import shutil
@@ -322,10 +362,18 @@ class TestCircuitBreaker(unittest.TestCase):
         self.provider._circuit_open = False
         self.provider._consecutive_failures = 0
         self.provider._circuit_open_until = 0.0
+        self.provider._metrics = {
+            "facts_queued": 0,
+            "facts_flushed": 0,
+            "facts_failed": 0,
+            "search_calls": 0,
+            "prefetch_calls": 0,
+            "circuit_opens": 0,
+        }
 
     def test_circuit_opens_after_consecutive_failures(self):
         """After 3 consecutive failures, circuit should open and reject immediately."""
-        with patch("__init__.urllib.request.urlopen", side_effect=Exception("Down")):
+        with patch("memora.plugin.urllib.request.urlopen", side_effect=Exception("Down")):
             # First 3 calls should attempt retries
             for _ in range(3):
                 try:
@@ -353,7 +401,7 @@ class TestCircuitBreaker(unittest.TestCase):
             mock_resp.read.return_value = b'{"ok": true}'
             return mock_resp
 
-        with patch("__init__.urllib.request.urlopen", side_effect=mock_response):
+        with patch("memora.plugin.urllib.request.urlopen", side_effect=mock_response):
             # 3 failures
             for _ in range(3):
                 try:
@@ -385,6 +433,14 @@ class TestContentValidation(unittest.TestCase):
         self.provider._circuit_open = False
         self.provider._consecutive_failures = 0
         self.provider._circuit_open_until = 0.0
+        self.provider._metrics = {
+            "facts_queued": 0,
+            "facts_flushed": 0,
+            "facts_failed": 0,
+            "search_calls": 0,
+            "prefetch_calls": 0,
+            "circuit_opens": 0,
+        }
 
     def tearDown(self):
         import shutil
@@ -425,7 +481,7 @@ class TestBackgroundFlush(unittest.TestCase):
         import shutil
         shutil.rmtree(self.tmpdir, ignore_errors=True)
 
-    @patch("__init__.urllib.request.urlopen")
+    @patch("memora.plugin.urllib.request.urlopen")
     def test_flush_thread_started_on_init(self, mock_urlopen):
         """After initialize(), background flush thread should be alive."""
         mock_resp = MagicMock()
@@ -439,6 +495,126 @@ class TestBackgroundFlush(unittest.TestCase):
         self.assertIsNotNone(provider._flush_thread)
         self.assertTrue(provider._flush_thread.is_alive())
         provider.shutdown()
+
+
+class TestMetrics(unittest.TestCase):
+    """P2: Metrics counters should track plugin activity."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.provider = HermesRagMemoryProvider()
+        self.provider._hermes_home = self.tmpdir
+        self.provider._agent_identity = "test"
+        self.provider._session_id = "test_session"
+        self.provider._queue_path = Path(self.tmpdir) / "test_queue.db"
+        self.provider._init_queue()
+        self.provider._lock = threading.Lock()
+        self.provider._seen_hashes = set()
+        self.provider._circuit_open = False
+        self.provider._consecutive_failures = 0
+        self.provider._circuit_open_until = 0.0
+        self.provider._metrics = {
+            "facts_queued": 0,
+            "facts_flushed": 0,
+            "facts_failed": 0,
+            "search_calls": 0,
+            "prefetch_calls": 0,
+            "circuit_opens": 0,
+        }
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def test_facts_queued_metric(self):
+        """_queue_add should increment facts_queued."""
+        self.provider._queue_add("memory", "This is a test fact for metrics counting.")
+        self.assertEqual(self.provider._metrics["facts_queued"], 1)
+        self.provider._queue_add("memory", "Another test fact for metrics counting.")
+        self.assertEqual(self.provider._metrics["facts_queued"], 2)
+
+    def test_get_metrics_returns_copy(self):
+        """get_metrics should return a copy of the metrics dict."""
+        self.provider._queue_add("memory", "Test fact for get_metrics.")
+        m = self.provider.get_metrics()
+        self.assertEqual(m["facts_queued"], 1)
+        # Modifying returned dict should not affect internal state
+        m["facts_queued"] = 999
+        self.assertEqual(self.provider._metrics["facts_queued"], 1)
+
+    @patch("memora.plugin.urllib.request.urlopen")
+    def test_facts_flushed_metric(self, mock_urlopen):
+        """_flush_queue should increment facts_flushed."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"success": True}).encode()
+        mock_urlopen.return_value = mock_resp
+
+        self.provider._base_url = "https://test.example.com"
+        self.provider._token = "test_token"
+        self.provider._queue_add("memory", "Fact one to flush.")
+        self.provider._queue_add("memory", "Fact two to flush.")
+        self.provider._flush_queue()
+        self.assertEqual(self.provider._metrics["facts_flushed"], 2)
+
+
+class TestPrefetchThreshold(unittest.TestCase):
+    """P2: Prefetch threshold should be configurable."""
+
+    def setUp(self):
+        self.provider = HermesRagMemoryProvider()
+        self.provider._base_url = "https://test.example.com"
+        self.provider._token = "test_token"
+        self.provider._prefetch_threshold = 0.7
+        self.provider._circuit_open = False
+        self.provider._consecutive_failures = 0
+        self.provider._circuit_open_until = 0.0
+        self.provider._metrics = {
+            "facts_queued": 0,
+            "facts_flushed": 0,
+            "facts_failed": 0,
+            "search_calls": 0,
+            "prefetch_calls": 0,
+            "circuit_opens": 0,
+        }
+
+    def tearDown(self):
+        pass
+
+    @patch("memora.plugin.urllib.request.urlopen")
+    def test_prefetch_respects_threshold(self, mock_urlopen):
+        """ prefetch should only include results above threshold."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "results": [
+                {"text": "High relevance fact", "rerank_score": 0.9, "metadata": {"category": "memory", "created_at": "2026-05-01T10:00:00Z"}},
+                {"text": "Low relevance fact", "rerank_score": 0.3, "metadata": {"category": "memory", "created_at": "2026-05-02T10:00:00Z"}},
+                {"text": "Medium relevance fact", "rerank_score": 0.75, "metadata": {"category": "user", "created_at": ""}},
+            ]
+        }).encode()
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        result = self.provider.prefetch("test query")
+        self.assertIn("High relevance fact", result)
+        self.assertIn("Medium relevance fact", result)
+        self.assertNotIn("Low relevance fact", result)
+        self.assertEqual(self.provider._metrics["prefetch_calls"], 1)
+
+    @patch("memora.plugin.urllib.request.urlopen")
+    def test_prefetch_includes_category_and_date(self, mock_urlopen):
+        """prefetch results should include category and date metadata."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "results": [
+                {"text": "Fact with metadata", "rerank_score": 0.9, "metadata": {"category": "business", "created_at": "2026-05-01T10:00:00Z"}},
+            ]
+        }).encode()
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        result = self.provider.prefetch("test query")
+        self.assertIn("[business]", result)
+        self.assertIn("[2026-05-01]", result)
 
 
 if __name__ == "__main__":
