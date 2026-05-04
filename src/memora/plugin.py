@@ -12,6 +12,7 @@ import logging
 import os
 import re
 import sqlite3
+import subprocess
 import threading
 import time
 import urllib.error
@@ -169,6 +170,10 @@ class HermesRagMemoryProvider(MemoryProvider):
 
         # Auto-ingest flag gates sync_turn
         self._auto_ingest = self._config.get("auto_ingest", True)
+
+        # Auto-commit flag gates git commits after session end
+        self._auto_commit = self._config.get("auto_commit", True)
+        self._modified_files: set[Path] = set()
 
         # Prefetch relevance threshold (P2: configurable)
         self._prefetch_threshold = self._config.get("prefetch_threshold", 0.5)
@@ -384,6 +389,9 @@ class HermesRagMemoryProvider(MemoryProvider):
         # Extract key facts from conversation and flush queue
         self._extract_facts(messages)
         self._flush_queue()
+        # Auto-commit any modified markdown memory files
+        if self._auto_commit:
+            self._commit_memory_files()
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
         return ""
@@ -412,6 +420,13 @@ class HermesRagMemoryProvider(MemoryProvider):
             {
                 "key": "auto_ingest",
                 "description": "Auto-ingest facts from every turn",
+                "secret": False,
+                "required": False,
+                "default": True,
+            },
+            {
+                "key": "auto_commit",
+                "description": "Auto-commit memory markdown files to git after each session",
                 "secret": False,
                 "required": False,
                 "default": True,
@@ -494,8 +509,52 @@ class HermesRagMemoryProvider(MemoryProvider):
                 if session_heading.strip() not in current_text[-2000:]:
                     f.write("\n" + session_heading)
                 f.write(bullet + "\n")
+            # Track for auto-commit
+            self._modified_files.add(file_path)
         except Exception as e:
             logger.debug("Local memory write failed: %s", e)
+
+    def _commit_memory_files(self) -> None:
+        """Git-commit modified markdown memory files (best-effort)."""
+        if not self._modified_files:
+            return
+        try:
+            # Find git root from memory_dir
+            git_root = self._memory_dir
+            while git_root != git_root.parent:
+                if (git_root / ".git").exists():
+                    break
+                git_root = git_root.parent
+            if not (git_root / ".git").exists():
+                logger.debug("No git repo found for auto-commit")
+                return
+
+            files = [str(f) for f in self._modified_files]
+            subprocess.run(
+                ["git", "add"] + files,
+                cwd=str(git_root),
+                capture_output=True,
+                check=False,
+            )
+            result = subprocess.run(
+                ["git", "diff", "--cached", "--quiet"],
+                cwd=str(git_root),
+                capture_output=True,
+                check=False,
+            )
+            if result.returncode == 0:
+                # Nothing to commit
+                self._modified_files.clear()
+                return
+            subprocess.run(
+                ["git", "commit", "-m", f"memory: auto-ingest from session {self._session_id or 'unknown'}"],
+                cwd=str(git_root),
+                capture_output=True,
+                check=False,
+            )
+            self._modified_files.clear()
+        except Exception as e:
+            logger.debug("Auto-commit failed: %s", e)
 
     def _flush_queue(self, chunk_size: int = 100) -> None:
         with self._lock:
