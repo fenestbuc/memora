@@ -1,5 +1,7 @@
 # Hermes RAG Memory
 
+> **Rebranded from Memora.** This repo was formerly called `memora`; the plugin name is now `hermes-rag-memory`.
+
 > Give your AI assistant a memory that persists across sessions.
 
 Hermes RAG Memory is a **second-brain plugin** for [Hermes](https://github.com/hermes-ai) agents.
