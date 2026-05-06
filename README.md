@@ -24,7 +24,7 @@ starts from zero. You waste time re-explaining:
 - Product decisions and the reasoning behind them
 - Team context, roles, and priorities
 
-**Hermes RAG Memory solves this.** Every conversation enriches a persistent knowledge graph
+**Memora solves this.** Every conversation enriches a persistent knowledge graph
 that your agent can search, reference, and reason over. The result: your AI
 co-founder actually *knows* your business.
 
@@ -43,7 +43,51 @@ Key capabilities:
 
 ---
 
-## Quick Start
+## Install
+
+### On an agent platform (Hermes)
+
+Memora is a `memory_provider` plugin for [Hermes](https://github.com/hermes-ai) agents. Install it into your agent's plugin directory:
+
+```bash
+cd ~/.hermes/plugins/
+git clone https://github.com/fenestbuc/memora.git
+pip install -e memora/
+```
+
+Then enable it in your Hermes `config.yaml`:
+
+```yaml
+memory:
+  provider: memora
+
+plugins:
+  enabled:
+    - memora
+```
+
+Set your environment variables:
+
+```bash
+export RAG_WORKER_URL="https://your-rag-worker.workers.dev"
+export RAG_AUTH_TOKEN="your-secret-token"
+```
+
+Restart Hermes. The agent will now persist every important fact, preference, and decision to the RAG backend automatically.
+
+### From source
+
+```bash
+git clone https://github.com/fenestbuc/memora.git
+cd memora
+pip install -e .
+```
+
+---
+
+## Quick Start (Full Deployment)
+
+If you are deploying the RAG worker backend yourself, follow these steps:
 
 ### 1. Deploy the RAG Worker
 
@@ -53,14 +97,7 @@ npx wrangler deploy
 # Note the deployed URL and set an AUTH_TOKEN secret
 ```
 
-### 2. Install Hermes RAG Memory
-
-```bash
-git clone https://github.com/fenestbuc/memora.git
-pip install -e memora/
-```
-
-### 3. Configure
+### 2. Configure
 
 ```bash
 cp memora/config/example.env .env
@@ -68,16 +105,7 @@ cp memora/config/example.env .env
 export $(cat .env | xargs)
 ```
 
-### 4. Add to Hermes
-
-Edit your Hermes `config.yaml`:
-
-```yaml
-memory:
-  provider: memora
-```
-
-### 5. Schedule Nightly Maintenance
+### 3. Schedule Nightly Maintenance
 
 ```bash
 # Add to crontab for daily indexing
