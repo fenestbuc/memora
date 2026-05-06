@@ -113,7 +113,10 @@ class TestAutoIngestGate(unittest.TestCase):
     def test_sync_turn_queued_when_auto_ingest_true(self):
         """sync_turn should queue when auto_ingest is True."""
         self.provider._auto_ingest = True
-        self.provider.sync_turn("Hello", "Hi there")
+        self.provider.sync_turn(
+            "We decided to pivot the pricing model to 1.25% on disbursals.",
+            "Noted. I will persist that strategic decision."
+        )
         conn = sqlite3.connect(self.provider._queue_path)
         count = conn.execute("SELECT COUNT(*) FROM queue").fetchone()[0]
         conn.close()
@@ -152,7 +155,7 @@ class TestIsAvailable(unittest.TestCase):
 
     def test_ellipsis_token_not_available(self):
         """Should return False when token contains '...' (redacted/partial)."""
-        with patch.dict(os.environ, {"RAG_WORKER_URL": "https://example.com", "RAG_AUTH_TOKEN": "your_auth_token_here"}, clear=False):
+        with patch.dict(os.environ, {"RAG_WORKER_URL": "https://example.com", "RAG_AUTH_TOKEN": "hrms_rag_53be..."}, clear=False):
             p = MemoraProvider()
             self.assertFalse(p.is_available())
 
