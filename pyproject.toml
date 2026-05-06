@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memora"
-version = "0.1.0"
+version = "0.2.0"
 description = "Persistent semantic memory plugin for Hermes AI agents"
 readme = "README.md"
 license = {text = "MIT"}
 authors = [
-    {name = "Hermes RAG Memory Contributors", email = "hello@kubar.tech"},
+    {name = "Memora Contributors", email = "hello@kubar.tech"},
 ]
 requires-python = ">=3.10"
 classifiers = [
