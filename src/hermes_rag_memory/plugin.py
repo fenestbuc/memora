@@ -66,7 +66,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _DEFAULT_URL = "https://your-rag-worker.workers.dev"
-_DEFAULT_TOKEN = "your_auth_token_here"
+_DEFAULT_TOKEN = "YOUR_RAG_AUTH_TOKEN"
 
 _TOOL_SCHEMAS = [
     {
@@ -276,18 +276,32 @@ class HermesRagMemoryProvider(MemoryProvider):
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         self._metrics["prefetch_calls"] += 1
         try:
-            result = self._request("/search", {"query": query, "top_k": 8})
+            result = self._request("/search", {"query": query, "top_k": 5})
             results = result.get("results", [])
             if not results:
                 return ""
             lines = ["## Relevant memories from past sessions:"]
+            seen_hashes: set[str] = set()
+            total_chars = len(lines[0])
+            max_chars = 2000
             for r in results:
                 score = r.get("rerank_score", r.get("vector_score", 0))
-                if score > self._prefetch_threshold:
-                    cat = r.get("metadata", {}).get("category", "memory")
-                    created = r.get("metadata", {}).get("created_at", "")
-                    date_tag = f" [{created[:10]}]" if created else ""
-                    lines.append(f"- [{cat}]{date_tag} {r.get('text', '')}")
+                if score < 0.6:
+                    continue
+                text = r.get("text", "")
+                # Deduplicate by content hash
+                text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+                if text_hash in seen_hashes:
+                    continue
+                seen_hashes.add(text_hash)
+                cat = r.get("metadata", {}).get("category", "memory")
+                created = r.get("metadata", {}).get("created_at", "")
+                date_tag = f" [{created[:10]}]" if created else ""
+                line = f"- [{cat}]{date_tag} {text}"
+                if total_chars + len(line) + 1 > max_chars:
+                    break
+                lines.append(line)
+                total_chars += len(line) + 1
             return "\n".join(lines) if len(lines) > 1 else ""
         except Exception as e:
             logger.debug("prefetch failed: %s", e)
@@ -296,12 +310,27 @@ class HermesRagMemoryProvider(MemoryProvider):
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
         pass
 
+    # Trivial messages that should not be persisted as memory
+    _TRIVIAL_RE = re.compile(
+        r"^(\s*(execute|go ahead|ok|yes|no|sure|done|retry|continue|stop|halt"
+        r"|test|validate|check|review|analyse|analyze|proceed|next"
+        r"|let's execute|let's go|please do|do it|run it"
+        r"|hello|hi|hey|thanks|thank you|ty)\s*[.!?]*\s*)$",
+        re.IGNORECASE,
+    )
+
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
         if not self._auto_ingest:
             return
-        # Lightweight: queue both messages for later batch processing
-        self._queue_add("memory", f"User: {user_content[:500]}")
-        self._queue_add("memory", f"Assistant: {assistant_content[:500]}")
+        # Skip trivial user messages
+        user_stripped = user_content.strip()
+        if len(user_stripped) < 15 or self._TRIVIAL_RE.match(user_stripped):
+            pass  # Do not queue trivial user messages
+        else:
+            self._queue_add("memory", f"User: {user_content[:500]}")
+        # Queue assistant response (always, unless it's a tool error or very short)
+        if len(assistant_content.strip()) >= 15:
+            self._queue_add("memory", f"Assistant: {assistant_content[:500]}")
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return _TOOL_SCHEMAS

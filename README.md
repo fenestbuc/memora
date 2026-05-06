@@ -123,13 +123,10 @@ HermesRagMemoryProvider (SQLite write-behind queue + local .md mirror)
 
 ```
 hermes-rag-memory/
-|-- src/memora/
+|-- src/hermes_rag_memory/
+|   |-- __init__.py        # Package metadata
 |   |-- plugin.py          # Hermes MemoryProvider implementation
-|   |-- brain_indexer.py   # Workspace manifest + session indexer
-|   |-- wiki_ingester.py   # Session -> markdown wiki generator
-|   |-- conflict_detector.py  # Contradiction detection
-|   |-- nightly_brain.py   # Scheduled maintenance runner
-|-- tests/                 # 23+ tests, TDD approach
+|-- tests/                 # Plugin tests
 |-- config/
 |   |-- example.env        # Template for env vars
 |-- docs/
