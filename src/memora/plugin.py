@@ -70,7 +70,7 @@ _DEFAULT_TOKEN = "YOUR_RAG_AUTH_TOKEN"
 
 _TOOL_SCHEMAS = [
     {
-        "name": "rag_memory_search",
+        "name": "memora_search",
         "description": "Semantic search across all indexed memories. Returns ranked results by relevance.",
         "parameters": {
             "type": "object",
@@ -82,7 +82,7 @@ _TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "rag_memory_list",
+        "name": "memora_list",
         "description": "List facts with SQL filters. Good for browsing specific categories.",
         "parameters": {
             "type": "object",
@@ -96,7 +96,7 @@ _TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "rag_memory_add",
+        "name": "memora_add",
         "description": "Persist a new fact to long-term memory.",
         "parameters": {
             "type": "object",
@@ -109,7 +109,7 @@ _TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "rag_memory_update",
+        "name": "memora_update",
         "description": "Update an existing fact by ID.",
         "parameters": {
             "type": "object",
@@ -122,7 +122,7 @@ _TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "rag_memory_delete",
+        "name": "memora_delete",
         "description": "Delete facts by ID.",
         "parameters": {
             "type": "object",
@@ -133,19 +133,19 @@ _TOOL_SCHEMAS = [
         },
     },
     {
-        "name": "rag_memory_stats",
+        "name": "memora_stats",
         "description": "Get memory stats (total facts, by category).",
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
 ]
 
 
-class HermesRagMemoryProvider(MemoryProvider):
+class MemoraProvider(MemoryProvider):
     """RAG-backed memory provider for Hermes."""
 
     @property
     def name(self) -> str:
-        return "hermes-rag-memory"
+        return "memora"
 
     def is_available(self) -> bool:
         url = os.environ.get("RAG_WORKER_URL", _DEFAULT_URL)
@@ -179,7 +179,7 @@ class HermesRagMemoryProvider(MemoryProvider):
         self._prefetch_threshold = self._config.get("prefetch_threshold", 0.5)
 
         # SQLite write-behind queue — scoped by agent identity
-        self._queue_path = Path(self._hermes_home) / f"rag_memory_queue_{self._agent_identity}.db"
+        self._queue_path = Path(self._hermes_home) / f"memora_queue_{self._agent_identity}.db"
         self._init_queue()
 
         self._base_url = os.environ.get("RAG_WORKER_URL", _DEFAULT_URL).rstrip("/")
@@ -268,9 +268,9 @@ class HermesRagMemoryProvider(MemoryProvider):
 
     def system_prompt_block(self) -> str:
         return (
-            "You have access to a persistent long-term memory via the rag_memory_* tools. "
-            "Use rag_memory_search to recall past context before answering. "
-            "After learning something important, use rag_memory_add to persist it."
+            "You have access to a persistent long-term memory via the memora_* tools. "
+            "Use memora_search to recall past context before answering. "
+            "After learning something important, use memora_add to persist it."
         )
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
@@ -337,20 +337,20 @@ class HermesRagMemoryProvider(MemoryProvider):
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
         action_map = {
-            "rag_memory_search": lambda: ("/search", {"query": args["query"], "top_k": args.get("top_k", 10)}),
-            "rag_memory_list": lambda: ("/memory/list", {k: v for k, v in args.items() if v is not None}),
-            "rag_memory_add": lambda: ("/memory/add", {
+            "memora_search": lambda: ("/search", {"query": args["query"], "top_k": args.get("top_k", 10)}),
+            "memora_list": lambda: ("/memory/list", {k: v for k, v in args.items() if v is not None}),
+            "memora_add": lambda: ("/memory/add", {
                 "content": args["content"],
                 "category": args.get("category", "memory"),
                 **({"id": args["id"]} if "id" in args else {}),
             }),
-            "rag_memory_update": lambda: ("/memory/update", {
+            "memora_update": lambda: ("/memory/update", {
                 "id": args["id"],
                 **({"content": args["content"]} if "content" in args else {}),
                 **({"category": args["category"]} if "category" in args else {}),
             }),
-            "rag_memory_delete": lambda: ("/memory/delete", {"ids": args.get("ids", [])}),
-            "rag_memory_stats": lambda: ("/memory/stats", None),
+            "memora_delete": lambda: ("/memory/delete", {"ids": args.get("ids", [])}),
+            "memora_stats": lambda: ("/memory/stats", None),
         }
         if tool_name not in action_map:
             raise NotImplementedError(f"Provider {self.name} does not handle tool {tool_name}")
@@ -358,7 +358,7 @@ class HermesRagMemoryProvider(MemoryProvider):
         path, body = action_map[tool_name]()
         try:
             result = self._request(path, body, method="GET" if body is None else "POST")
-            if tool_name == "rag_memory_search":
+            if tool_name == "memora_search":
                 self._metrics["search_calls"] += 1
             return json.dumps(result)
         except Exception as e:
@@ -368,7 +368,7 @@ class HermesRagMemoryProvider(MemoryProvider):
         self._stop_background_flush()
         self._flush_queue()
         self._vacuum_queue()
-        logger.info("HermesRagMemoryProvider shutdown. Metrics: %s", self._metrics)
+        logger.info("MemoraProvider shutdown. Metrics: %s", self._metrics)
 
     def get_metrics(self) -> Dict[str, int]:
         """Return current metrics counters."""
@@ -477,7 +477,7 @@ class HermesRagMemoryProvider(MemoryProvider):
         ]
 
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
-        config_path = Path(hermes_home) / "hermes-rag-memory.json"
+        config_path = Path(hermes_home) / "memora.json"
         config_path.write_text(json.dumps(values, indent=2))
 
     def on_memory_write(self, action: str, target: str, content: str) -> None:
@@ -770,4 +770,4 @@ class HermesRagMemoryProvider(MemoryProvider):
 
 def register(ctx) -> None:
     """Plugin registration entry point."""
-    ctx.register_memory_provider(HermesRagMemoryProvider())
+    ctx.register_memory_provider(MemoraProvider())

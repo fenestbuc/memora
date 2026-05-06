@@ -1,4 +1,4 @@
-"""TDD tests for HermesRagMemoryProvider (installed plugin).
+"""TDD tests for MemoraProvider (installed plugin).
 
 Tests cover all P0 and P1 bugs diagnosed in the 2026-05-04 audit.
 Run with: pytest memora/tests/test_plugin.py -v
@@ -21,7 +21,7 @@ from unittest.mock import MagicMock, patch
 import sys
 # Plugin is at src/memora/plugin.py, pythonpath=["src"] in pyproject.toml
 
-from memora.plugin import HermesRagMemoryProvider
+from memora.plugin import MemoraProvider
 
 
 class TestLocalMemoryMirror(unittest.TestCase):
@@ -30,7 +30,7 @@ class TestLocalMemoryMirror(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
         self.memdir = Path(self.tmpdir) / "memory"
-        self.provider = HermesRagMemoryProvider()
+        self.provider = MemoraProvider()
         self.provider._hermes_home = self.tmpdir
         self.provider._agent_identity = "test"
         self.provider._session_id = "test_session_001"
@@ -85,7 +85,7 @@ class TestAutoIngestGate(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self.provider = HermesRagMemoryProvider()
+        self.provider = MemoraProvider()
         self.provider._hermes_home = self.tmpdir
         self.provider._agent_identity = "test"
         self.provider._session_id = "test_session"
@@ -135,25 +135,25 @@ class TestIsAvailable(unittest.TestCase):
     def test_real_credentials_available(self):
         """Should return True when both URL and real token are set."""
         with patch.dict(os.environ, {"RAG_WORKER_URL": "https://example.com", "RAG_AUTH_TOKEN": "real_token_123"}, clear=False):
-            p = HermesRagMemoryProvider()
+            p = MemoraProvider()
             self.assertTrue(p.is_available())
 
     def test_placeholder_token_not_available(self):
         """Should return False when token contains 'YOUR_' placeholder."""
         with patch.dict(os.environ, {"RAG_WORKER_URL": "https://example.com", "RAG_AUTH_TOKEN": "YOUR_SECRET_TOKEN"}, clear=False):
-            p = HermesRagMemoryProvider()
+            p = MemoraProvider()
             self.assertFalse(p.is_available())
 
     def test_empty_token_not_available(self):
         """Should return False when token is empty."""
         with patch.dict(os.environ, {"RAG_WORKER_URL": "https://example.com", "RAG_AUTH_TOKEN": ""}, clear=False):
-            p = HermesRagMemoryProvider()
+            p = MemoraProvider()
             self.assertFalse(p.is_available())
 
     def test_ellipsis_token_not_available(self):
         """Should return False when token contains '...' (redacted/partial)."""
         with patch.dict(os.environ, {"RAG_WORKER_URL": "https://example.com", "RAG_AUTH_TOKEN": "your_auth_token_here"}, clear=False):
-            p = HermesRagMemoryProvider()
+            p = MemoraProvider()
             self.assertFalse(p.is_available())
 
 
@@ -162,7 +162,7 @@ class TestQueueDedup(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self.provider = HermesRagMemoryProvider()
+        self.provider = MemoraProvider()
         self.provider._hermes_home = self.tmpdir
         self.provider._agent_identity = "test"
         self.provider._session_id = "test_session"
@@ -200,7 +200,7 @@ class TestQueueDedup(unittest.TestCase):
         # First queue
         self.provider._queue_add("memory", "persistent fact")
         # Simulate new session (new provider instance, same DB)
-        p2 = HermesRagMemoryProvider()
+        p2 = MemoraProvider()
         p2._queue_path = self.provider._queue_path
         p2._init_queue()
         p2._lock = threading.Lock()
@@ -221,7 +221,7 @@ class TestFlushQueue(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self.provider = HermesRagMemoryProvider()
+        self.provider = MemoraProvider()
         self.provider._hermes_home = self.tmpdir
         self.provider._agent_identity = "test"
         self.provider._session_id = "test_session"
@@ -291,7 +291,7 @@ class TestExtractFacts(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self.provider = HermesRagMemoryProvider()
+        self.provider = MemoraProvider()
         self.provider._hermes_home = self.tmpdir
         self.provider._agent_identity = "test"
         self.provider._session_id = "test_session"
@@ -356,7 +356,7 @@ class TestCircuitBreaker(unittest.TestCase):
     """P1 Bug: No circuit breaker for unreachable RAG worker."""
 
     def setUp(self):
-        self.provider = HermesRagMemoryProvider()
+        self.provider = MemoraProvider()
         self.provider._base_url = "https://test.example.com"
         self.provider._token = "test_token"
         self.provider._circuit_open = False
@@ -422,7 +422,7 @@ class TestContentValidation(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self.provider = HermesRagMemoryProvider()
+        self.provider = MemoraProvider()
         self.provider._hermes_home = self.tmpdir
         self.provider._agent_identity = "test"
         self.provider._session_id = "test_session"
@@ -488,7 +488,7 @@ class TestBackgroundFlush(unittest.TestCase):
         mock_resp.read.return_value = json.dumps({"status": "ok"}).encode()
         mock_urlopen.return_value = mock_resp
 
-        provider = HermesRagMemoryProvider()
+        provider = MemoraProvider()
         with patch.dict(os.environ, {"RAG_WORKER_URL": "https://test.example.com", "RAG_AUTH_TOKEN": "real_token"}, clear=False):
             provider.initialize("test_session", hermes_home=self.tmpdir)
 
@@ -502,7 +502,7 @@ class TestMetrics(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
-        self.provider = HermesRagMemoryProvider()
+        self.provider = MemoraProvider()
         self.provider._hermes_home = self.tmpdir
         self.provider._agent_identity = "test"
         self.provider._session_id = "test_session"
@@ -561,7 +561,7 @@ class TestPrefetchThreshold(unittest.TestCase):
     """P2: Prefetch threshold should be configurable."""
 
     def setUp(self):
-        self.provider = HermesRagMemoryProvider()
+        self.provider = MemoraProvider()
         self.provider._base_url = "https://test.example.com"
         self.provider._token = "test_token"
         self.provider._prefetch_threshold = 0.7

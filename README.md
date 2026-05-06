@@ -1,10 +1,10 @@
-# Hermes RAG Memory
+# Memora
 
-> **Rebranded from Memora.** This repo was formerly called `memora`; the plugin name is now `hermes-rag-memory`.
+> **Memora** — persistent semantic memory for AI agents.
 
 > Give your AI assistant a memory that persists across sessions.
 
-Hermes RAG Memory is a **second-brain plugin** for [Hermes](https://github.com/hermes-ai) agents.
+Memora is a **second-brain plugin** for [Hermes](https://github.com/hermes-ai) agents.
 It bridges your AI to a Cloudflare Workers RAG backend, storing every important fact,
 preference, and decision so your agent remembers context days, weeks, or months later.
 
@@ -56,14 +56,14 @@ npx wrangler deploy
 ### 2. Install Hermes RAG Memory
 
 ```bash
-git clone https://github.com/fenestbuc/hermes-rag-memory.git
-pip install -e hermes-rag-memory/
+git clone https://github.com/fenestbuc/memora.git
+pip install -e memora/
 ```
 
 ### 3. Configure
 
 ```bash
-cp hermes-rag-memory/config/example.env .env
+cp memora/config/example.env .env
 # Edit .env with your worker URL and token
 export $(cat .env | xargs)
 ```
@@ -74,7 +74,7 @@ Edit your Hermes `config.yaml`:
 
 ```yaml
 memory:
-  provider: hermes-rag-memory
+  provider: memora
 ```
 
 ### 5. Schedule Nightly Maintenance
@@ -92,7 +92,7 @@ memory:
 Hermes Agent
     |
     v
-HermesRagMemoryProvider (SQLite write-behind queue + local .md mirror)
+MemoraProvider (SQLite write-behind queue + local .md mirror)
     |
     +--> Batch flush --> Cloudflare Workers RAG Backend
     |                      (Vectorize + D1 + BGE-M3)
@@ -122,8 +122,8 @@ HermesRagMemoryProvider (SQLite write-behind queue + local .md mirror)
 ## Project Structure
 
 ```
-hermes-rag-memory/
-|-- src/hermes_rag_memory/
+memora/
+|-- src/memora/
 |   |-- __init__.py        # Package metadata
 |   |-- plugin.py          # Hermes MemoryProvider implementation
 |-- tests/                 # Plugin tests
@@ -138,7 +138,7 @@ hermes-rag-memory/
 ## Development
 
 ```bash
-cd hermes-rag-memory
+cd memora
 python -m pytest tests/ -v      # run all tests
 python -m memora.nightly_brain  # run maintenance manually
 ```
