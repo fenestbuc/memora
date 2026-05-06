@@ -43,13 +43,20 @@ Key capabilities:
 
 ---
 
-## Install
+## Two-Part Architecture: Plugin vs. Skill
 
-Memora consists of a plugin (which handles the SQLite queue and background sync) and a skill (which teaches the agent how to use the search/add/delete tools).
+Because of how Hermes manages integrations, Memora consists of two required halves working together:
+
+1. **The Plugin (Python):** Hooks into Hermes' core lifecycle. It intercepts your conversations, manages the SQLite write-behind queue, handles background syncing to Cloudflare, and exposes the low-level API tools (e.g., `memora_search`, `memora_add`).
+2. **The Skill (Markdown):** The instruction manual for the AI. It teaches the agent *when* and *how* to actually use the plugin's tools, how to categorize facts, and gives it the commands for running nightly maintenance scripts.
+
+---
+
+## Install
 
 ### 1. Install the Plugin
 
-Install it into your agent's plugin directory:
+Install the Python plugin into your agent's plugin directory:
 
 ```bash
 cd ~/.hermes/plugins/
@@ -72,18 +79,27 @@ Set your environment variables:
 
 ```bash
 export RAG_WORKER_URL="https://your-rag-worker.workers.dev"
-export RAG_AUTH_TOKEN="your-secret-token"
+export RAG_AUTH_TOKEN="***"
 ```
 
 Restart Hermes. The agent will now persist every important fact, preference, and decision to the RAG backend automatically.
 
+### 2. Install the Skill
+
+Copy the companion skill into your agent's skills directory so it knows how to manage the new tools:
+
+```bash
+mkdir -p ~/.hermes/skills/memora
+cp memora/docs/SKILL.md ~/.hermes/skills/memora/SKILL.md
+```
+
 ---
 
-## Quick Start
+## Quick Start (Deploying the Backend)
 
 ### Prerequisites
 
-Memora requires a running RAG worker backend. If you already have one deployed, skip to the plugin install above. If you need to deploy the backend yourself, the worker code lives in a separate repository (Cloudflare Workers + Vectorize + D1).
+Memora requires a running RAG worker backend. If you already have one deployed, you're done after the install steps above. If you need to deploy the backend yourself, the worker code lives in a separate repository (Cloudflare Workers + Vectorize + D1).
 
 ### Environment Setup
 
@@ -102,15 +118,6 @@ If you have deployed the RAG worker and set up the workspace, schedule the night
 ```bash
 # Add to crontab for daily indexing
 0 2 * * * cd ~/hermes-workspace && memora-nightly
-```
-
-### 2. Install the Skill
-
-To teach your agent how to use these new memory tools and run the maintenance scripts, install the companion skill:
-
-```bash
-mkdir -p ~/.hermes/skills/memora
-cp docs/SKILL.md ~/.hermes/skills/memora/SKILL.md
 ```
 
 ---
