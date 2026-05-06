@@ -100,6 +100,15 @@ If you have deployed the RAG worker and set up the workspace, schedule the night
 0 2 * * * cd ~/hermes-workspace && memora-nightly
 ```
 
+### Optional: Install the Skill
+
+To teach your agent how to manage its own memory and run these maintenance scripts, install the included skill:
+
+```bash
+mkdir -p ~/.hermes/skills/memora
+cp docs/SKILL.md ~/.hermes/skills/memora/SKILL.md
+```
+
 ---
 
 ## Architecture
