@@ -45,7 +45,11 @@ Key capabilities:
 
 ## Install
 
-Memora is a `memory_provider` plugin for Hermes agents. Install it into your agent's plugin directory:
+Memora consists of a plugin (which handles the SQLite queue and background sync) and a skill (which teaches the agent how to use the search/add/delete tools).
+
+### 1. Install the Plugin
+
+Install it into your agent's plugin directory:
 
 ```bash
 cd ~/.hermes/plugins/
@@ -100,9 +104,9 @@ If you have deployed the RAG worker and set up the workspace, schedule the night
 0 2 * * * cd ~/hermes-workspace && memora-nightly
 ```
 
-### Optional: Install the Skill
+### 2. Install the Skill
 
-To teach your agent how to manage its own memory and run these maintenance scripts, install the included skill:
+To teach your agent how to use these new memory tools and run the maintenance scripts, install the companion skill:
 
 ```bash
 mkdir -p ~/.hermes/skills/memora
