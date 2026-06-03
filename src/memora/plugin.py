@@ -9,6 +9,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+from .cache import SqliteL1Cache
+import hashlib
 import os
 import re
 import sqlite3
@@ -38,6 +40,7 @@ except ImportError:
             return []
         def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
             raise NotImplementedError
+            raise NotImplementedError
         def system_prompt_block(self) -> str:
             return ""
         def prefetch(self, query: str, *, session_id: str = "") -> str:
@@ -65,8 +68,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_URL = "https://your-rag-worker.workers.dev"
-_DEFAULT_TOKEN = "YOUR_RAG_AUTH_TOKEN"
+_DEFAULT_URL = os.environ.get("RAG_WORKER_URL", "")
+_DEFAULT_TOKEN = os.environ.get("RAG_AUTH_TOKEN", "")
 
 _TOOL_SCHEMAS = [
     {
@@ -77,6 +80,8 @@ _TOOL_SCHEMAS = [
             "properties": {
                 "query": {"type": "string", "description": "The search query."},
                 "top_k": {"type": "integer", "description": "Max results (default: 10)."},
+                "use_reranking": {"type": "boolean", "description": "Use BGE cross-encoder for hybrid search (default: true)."},
+                "parent_id": {"type": "string", "description": "Filter by Graph Metadata parent_id."}
             },
             "required": ["query"],
         },
@@ -103,6 +108,7 @@ _TOOL_SCHEMAS = [
             "properties": {
                 "content": {"type": "string", "description": "The fact to remember."},
                 "category": {"type": "string", "description": "Category tag (e.g., projects, strategy, business, integrations, user). MUST be specific, avoid the default 'memory' bucket."},
+                "parent_id": {"type": "string", "description": "Optional Graph Metadata parent_id for bidirectional linking."},
                 "id": {"type": "string"},
             },
             "required": ["content"],
@@ -158,6 +164,7 @@ class MemoraProvider(MemoryProvider):
         return True
 
     def initialize(self, session_id: str, **kwargs) -> None:
+        self._l1_cache = SqliteL1Cache()
         self._session_id = session_id
         self._hermes_home = kwargs.get("hermes_home", str(Path.home() / ".hermes"))
         self._agent_identity = kwargs.get("agent_identity", "default")
@@ -337,12 +344,61 @@ class MemoraProvider(MemoryProvider):
         return _TOOL_SCHEMAS
 
     def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
+        # Intercept memora_add for chunking and offline-fallback
+        if tool_name == "memora_add":
+            content_str = args["content"]
+            category = args.get("category", "memory")
+            parent_id = args.get("parent_id")
+            
+            # Chunking logic for large texts (e.g. > 4000 chars)
+            max_chunk = 4000
+            if len(content_str) > max_chunk:
+                chunks = [content_str[i:i+max_chunk] for i in range(0, len(content_str), max_chunk)]
+                results = []
+                for i, chunk in enumerate(chunks):
+                    # For chunks after the first, we use the provided parent_id, or we could link them.
+                    # Simple approach: just add them all with the same parent_id and category.
+                    try:
+                        res = self._request("/memory/add", {
+                            "content": f"[Part {i+1}/{len(chunks)}] {chunk}",
+                            "category": category,
+                            "parent_id": parent_id
+                        })
+                        results.append(res)
+                    except Exception as e:
+                        # Fallback to queue if network fails
+                        self._queue_add(category, f"[Part {i+1}/{len(chunks)}] {chunk}")
+                        results.append({"status": "queued_offline", "error": str(e)})
+                self._l1_cache.clear()
+                return json.dumps({"status": "success", "chunks_processed": len(chunks), "results": results})
+            
+            # Normal size handling with offline fallback
+            try:
+                res = self._request("/memory/add", {
+                    "content": content_str,
+                    "category": category,
+                    "parent_id": parent_id,
+                    **({"id": args["id"]} if "id" in args else {})
+                })
+                self._l1_cache.clear()
+                return json.dumps(res)
+            except Exception as e:
+                self._queue_add(category, content_str)
+                self._l1_cache.clear()
+                return json.dumps({"status": "queued_offline", "error": str(e), "message": "Network unavailable. Fact queued for background sync."})
+
         action_map = {
-            "memora_search": lambda: ("/search", {"query": args["query"], "top_k": args.get("top_k", 10)}),
+            "memora_search": lambda: ("/search", {
+                "query": args["query"], 
+                "top_k": args.get("top_k", 10),
+                **({"use_reranking": args["use_reranking"]} if "use_reranking" in args else {}),
+                **({"parent_id": args["parent_id"]} if "parent_id" in args else {})
+            }),
             "memora_list": lambda: ("/memory/list", {k: v for k, v in args.items() if v is not None}),
             "memora_add": lambda: ("/memory/add", {
                 "content": args["content"],
                 "category": args.get("category", "memory"),
+                **({"parent_id": args["parent_id"]} if "parent_id" in args else {}),
                 **({"id": args["id"]} if "id" in args else {}),
             }),
             "memora_update": lambda: ("/memory/update", {
@@ -357,10 +413,26 @@ class MemoraProvider(MemoryProvider):
             raise NotImplementedError(f"Provider {self.name} does not handle tool {tool_name}")
 
         path, body = action_map[tool_name]()
+        
+        # Local L1 Cache logic
+        cache_key = None
+        if tool_name == "memora_search":
+            hasher = hashlib.sha256()
+            hasher.update(json.dumps(body, sort_keys=True).encode("utf-8"))
+            cache_key = f"search:{hasher.hexdigest()}"
+            cached_result = self._l1_cache.get(cache_key)
+            if cached_result is not None:
+                self._metrics["search_calls"] += 1
+                return json.dumps(cached_result)
+        elif tool_name in ("memora_add", "memora_update", "memora_delete"):
+            self._l1_cache.clear()
+
         try:
             result = self._request(path, body, method="GET" if body is None else "POST")
             if tool_name == "memora_search":
                 self._metrics["search_calls"] += 1
+                if cache_key and "error" not in result:
+                    self._l1_cache.set(cache_key, result, ttl_seconds=300) # 5 min TTL
             return json.dumps(result)
         except Exception as e:
             return json.dumps({"error": str(e)})
@@ -519,73 +591,14 @@ class MemoraProvider(MemoryProvider):
             self._write_local_memory(category, content)
 
     def _write_local_memory(self, category: str, content: str) -> None:
-        """Append a fact to the local markdown memory file (e.g. memory/business.md)."""
-        try:
-            self._memory_dir.mkdir(parents=True, exist_ok=True)
-            safe_category = re.sub(r"[^a-zA-Z0-9_-]", "_", category).lower()
-            file_path = self._memory_dir / f"{safe_category}.md"
-
-            # Ensure file has a header if new
-            if not file_path.exists():
-                file_path.write_text(f"# {category.title()} Context\n\n")
-
-            # Append under current session heading
-            session_heading = f"## From session {self._session_id or 'unknown'}\n\n"
-            bullet = f"- {content.strip().replace(chr(10), ' ')}\n"
-
-            with open(file_path, "a", encoding="utf-8") as f:
-                # Only add session heading if file doesn't already end with it
-                current_text = file_path.read_text(encoding="utf-8")
-                if session_heading.strip() not in current_text[-2000:]:
-                    f.write("\n" + session_heading)
-                f.write(bullet + "\n")
-            # Track for auto-commit
-            self._modified_files.add(file_path)
-        except Exception as e:
-            logger.debug("Local memory write failed: %s", e)
+        """DEPRECATED: No longer write to local markdown files.
+        RAG is the primary store. We only keep memory.md as a manual curated fallback."""
+        pass
 
     def _commit_memory_files(self) -> None:
-        """Git-commit modified markdown memory files (best-effort)."""
-        if not self._modified_files:
-            return
-        try:
-            # Find git root from memory_dir
-            git_root = self._memory_dir
-            while git_root != git_root.parent:
-                if (git_root / ".git").exists():
-                    break
-                git_root = git_root.parent
-            if not (git_root / ".git").exists():
-                logger.debug("No git repo found for auto-commit")
-                return
-
-            files = [str(f) for f in self._modified_files]
-            subprocess.run(
-                ["git", "add"] + files,
-                cwd=str(git_root),
-                capture_output=True,
-                check=False,
-            )
-            result = subprocess.run(
-                ["git", "diff", "--cached", "--quiet"],
-                cwd=str(git_root),
-                capture_output=True,
-                check=False,
-            )
-            if result.returncode == 0:
-                # Nothing to commit
-                self._modified_files.clear()
-                return
-            subprocess.run(
-                ["git", "commit", "-m", f"memory: auto-ingest from session {self._session_id or 'unknown'}"],
-                cwd=str(git_root),
-                capture_output=True,
-                check=False,
-            )
-            self._modified_files.clear()
-        except Exception as e:
-            logger.debug("Auto-commit failed: %s", e)
-
+        """DEPRECATED: Markdown auto-commits are disabled."""
+        self._modified_files.clear()
+        pass
     def _flush_queue(self, chunk_size: int = 100) -> None:
         with self._lock:
             conn = sqlite3.connect(self._queue_path)
