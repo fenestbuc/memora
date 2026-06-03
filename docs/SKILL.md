@@ -48,8 +48,8 @@ Memora provides the following tools:
 3. Do not assume facts are missing if they were just added. Vector indexing has a slight latency.
 
 ### 2. Capture & Update
-1. After learning something important (e.g., investor preferences, strategic pivots), call `memora_add`.
-2. Categorize appropriately (e.g., `user` for preferences, `business` for strategy, `project` for execution).
+1. After learning something important (e.g., investor preferences, strategic pivots), DO NOT use the default `memory` tool. ALWAYS call `memora_add` directly to push to the RAG backend.
+2. Categorize appropriately (e.g., `user` for preferences, `business` for strategy, `project` for execution). MUST be specific, avoid the default 'memory' bucket.
 3. If a previous fact is contradicted, use `memora_update` to revise it rather than adding a duplicate.
 
 ### 3. Maintenance & CLI Scripts
