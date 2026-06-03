@@ -9,6 +9,8 @@ import sys
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
+import urllib.request
+import os
 
 # Default workspace path; override with first CLI arg
 _workspace = str(Path.home() / "memora-workspace")
@@ -21,6 +23,40 @@ from memora.conflict_detector import detect_conflicts
 
 _MAX_RETRIES = 2
 
+def evaluate_rag(url: str, token: str) -> dict:
+    """Trigger evaluation on the RAG worker."""
+    req = urllib.request.Request(
+        f"{url}/evaluate",
+        data=json.dumps({"top_k": 10}).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+            "User-Agent": "hermes-nightly/1.0"
+        },
+        method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            return {
+                "status": "ok",
+                "mrr": data.get("mrr", 0),
+                "hit_rate": data.get("hit_rate", 0),
+                "total": data.get("total", 0)
+            }
+    except Exception as e:
+        return {"status": "failed", "error": str(e)}
+
+def _get_rag_token() -> str:
+    """Extract token from wrangler.toml as fallback."""
+    try:
+        wrangler = Path.home() / "hermes-workspace" / "hermes-rag" / "wrangler.toml"
+        for line in wrangler.read_text().splitlines():
+            if 'AUTH_TOKEN=' in line or 'AUTH_TOKEN =' in line:
+                return line.split('"', 2)[1]
+    except Exception:
+        pass
+    return ""
 
 def _run_step(name: str, fn, *args, retries: int = _MAX_RETRIES):
     """Run a step with retry. Returns (result_dict, error_or_none)."""
@@ -88,6 +124,18 @@ def main(workspace_path: str | None = None):
     report["steps"]["lint_wiki"] = {"broken_links": broken, "count": len(broken)}
     if broken:
         print(f"  Found {len(broken)} broken wikilink(s)")
+
+    # 5. Evaluate RAG Backend
+    print("[5/5] Evaluating RAG retrieval...")
+    url = os.environ.get("RAG_WORKER_URL", "https://hermes-rag.team-2b5.workers.dev")
+    token = os.environ.get("RAG_AUTH_TOKEN") or _get_rag_token()
+    if token:
+        r5 = evaluate_rag(url, token)
+        report["steps"]["evaluate_rag"] = r5
+        if r5["status"] == "ok":
+            print(f"  MRR: {r5['mrr']:.2f}, Hit Rate: {r5['hit_rate']:.2f} (Total Evals: {r5['total']})")
+    else:
+        report["steps"]["evaluate_rag"] = {"status": "skipped", "reason": "No auth token found"}
 
     # Write report
     report["finished"] = datetime.now(timezone.utc).isoformat()
