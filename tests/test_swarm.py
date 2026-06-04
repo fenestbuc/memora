@@ -69,6 +69,36 @@ class TestSwarmManagerTrigger(unittest.TestCase):
             _args, kwargs = mock_create.call_args
             self.assertEqual(len(kwargs["body"].split("**Fact:**\n")[-1]), 2000)
 
+    @patch.dict(os.environ, {"MEMORA_KANBAN_BACKEND": "linear", "LINEAR_API_KEY": "test-key"})
+    @patch("memora.swarm_manager.urllib.request.urlopen")
+    def test_trigger_linear_backend(self, mock_urlopen):
+        """When MEMORA_KANBAN_BACKEND=linear, trigger should call Linear API."""
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({
+            "data": {"issueCreate": {"success": True, "issue": {"id": "i-1", "identifier": "TEAM-42", "url": "https://linear.app/issue/TEAM-42", "title": "test"}}}
+        }).encode()
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        result = swarm_manager.trigger(
+            source="rag",
+            content="Linear test fact.",
+            category="strategy",
+        )
+
+        self.assertEqual(result["identifier"], "TEAM-42")
+        self.assertIn("linear.app", result["url"])
+
+    @patch.dict(os.environ, {"MEMORA_KANBAN_BACKEND": "none"})
+    def test_trigger_none_backend(self):
+        """When backend is 'none', trigger should return None and log a warning."""
+        result = swarm_manager.trigger(
+            source="rag",
+            content="No backend configured.",
+            category="memory",
+        )
+        self.assertIsNone(result)
+
 
 class TestPluginSwarmIntegration(unittest.TestCase):
     """MemoraProvider should optionally trigger swarm tasks on fact ingest."""

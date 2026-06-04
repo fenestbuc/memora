@@ -1,4 +1,4 @@
-"""Tests for the interactive onboarding flow (Phase 1, Task 1).
+"""Tests for the interactive onboarding flow.
 
 Run with: pytest tests/test_onboarding.py -v
 """
@@ -19,8 +19,9 @@ class TestOnboarding:
     """TDD for interactive onboarding prompt, local save, and GitHub push."""
 
     def test_onboarding_prompts_and_saves_json(self, tmp_path: Path) -> None:
-        """Onboarding should prompt for inputs and save memora.json."""
-        inputs = iter(["Alice", "CEO", "https://github.com/acme/corp"])
+        """Onboarding should prompt for inputs and save memora.json with defaults."""
+        # Name, Role, Repo, Kanban choice (number), Tunnel choice (number)
+        inputs = iter(["Alice", "CEO", "https://github.com/acme/corp", "1", "1"])
 
         with patch("builtins.input", side_effect=inputs):
             with patch("memora.onboarding.subprocess.run"):
@@ -30,15 +31,29 @@ class TestOnboarding:
         assert profile["first_name"] == "Alice"
         assert profile["role"] == "CEO"
         assert profile["company_github_repo"] == "https://github.com/acme/corp"
+        assert profile["kanban_backend"] == "hermes"
+        assert profile["tunnel_provider"] == "cloudflared"
 
         memora_json = tmp_path / "memora.json"
         assert memora_json.exists()
         saved = json.loads(memora_json.read_text(encoding="utf-8"))
         assert saved == profile
 
+    def test_onboarding_selects_linear_and_ngrok(self, tmp_path: Path) -> None:
+        """User should be able to select Linear and ngrok via number input."""
+        inputs = iter(["Bob", "Engineering", "https://github.com/acme/corp", "2", "2"])
+
+        with patch("builtins.input", side_effect=inputs):
+            with patch("memora.onboarding.subprocess.run"):
+                with patch("memora.onboarding.generate_company_pr"):
+                    profile = run_onboarding(hermes_home=str(tmp_path))
+
+        assert profile["kanban_backend"] == "linear"
+        assert profile["tunnel_provider"] == "ngrok"
+
     def test_onboarding_creates_member_file_and_pushes(self, tmp_path: Path) -> None:
         """Onboarding should push a members/{role}-{name}.json declaration."""
-        inputs = iter(["Bob", "Engineering", "https://github.com/acme/corp"])
+        inputs = iter(["Bob", "Engineering", "https://github.com/acme/corp", "hermes", "cloudflared"])
 
         with patch("builtins.input", side_effect=inputs):
             with patch("memora.onboarding.subprocess.run"):
@@ -57,6 +72,7 @@ class TestOnboarding:
         assert parsed["first_name"] == "Bob"
         assert parsed["role"] == "Engineering"
         assert parsed["company_github_repo"] == "https://github.com/acme/corp"
+        assert parsed["kanban_backend"] == "hermes"
 
     def test_onboarding_rejects_empty_repo_url(self, tmp_path: Path) -> None:
         """Empty repo URL should print instructions and exit."""
@@ -72,7 +88,7 @@ class TestOnboarding:
         self, tmp_path: Path
     ) -> None:
         """Empty first_name or role should re-prompt until filled."""
-        inputs = iter(["", "Alice", "", "CEO", "https://github.com/acme/corp"])
+        inputs = iter(["", "Alice", "", "CEO", "https://github.com/acme/corp", "1", "1"])
 
         with patch("builtins.input", side_effect=inputs):
             with patch("memora.onboarding.subprocess.run"):
@@ -84,7 +100,7 @@ class TestOnboarding:
 
     def test_onboarding_cleans_up_json_on_git_failure(self, tmp_path: Path) -> None:
         """Subprocess errors should remove memora.json and exit with an auth hint."""
-        inputs = iter(["Alice", "CEO", "https://github.com/acme/corp"])
+        inputs = iter(["Alice", "CEO", "https://github.com/acme/corp", "1", "1"])
         memora_json = tmp_path / "memora.json"
 
         with patch("builtins.input", side_effect=inputs):
@@ -102,7 +118,7 @@ class TestOnboarding:
         self, tmp_path: Path
     ) -> None:
         """If git clone actually fails during _push_member_declaration, clean up."""
-        inputs = iter(["Alice", "CEO", "https://github.com/acme/corp"])
+        inputs = iter(["Alice", "CEO", "https://github.com/acme/corp", "1", "1"])
 
         def fake_subprocess(cmd, **kwargs):
             if cmd[0] == "git" and cmd[1] == "clone":
@@ -118,6 +134,21 @@ class TestOnboarding:
 
         assert exc_info.value.code == 1
         assert not (tmp_path / "memora.json").exists()
+
+    def test_onboarding_writes_env_helper(self, tmp_path: Path) -> None:
+        """When non-default choices are made, an env helper file should be written."""
+        inputs = iter(["Alice", "CEO", "https://github.com/acme/corp", "2", "2"])
+
+        with patch("builtins.input", side_effect=inputs):
+            with patch("memora.onboarding.subprocess.run"):
+                with patch("memora.onboarding.generate_company_pr"):
+                    run_onboarding(hermes_home=str(tmp_path))
+
+        env_file = tmp_path / "memora_env.sh"
+        assert env_file.exists()
+        text = env_file.read_text()
+        assert 'MEMORA_KANBAN_BACKEND="linear"' in text
+        assert 'MEMORA_TUNNEL="ngrok"' in text
 
 
 class TestLoadProfile:

@@ -2,6 +2,8 @@
 
 Summarizes open GitHub PRs for the CEO approval flow and alerts on
 new members joining the digital-twin network.
+
+**No auto-merge.** Every PR requires explicit CEO approval via the digest.
 """
 
 from __future__ import annotations
@@ -38,26 +40,32 @@ def _fetch_open_prs() -> list[dict[str, Any]]:
         return []
 
 
-def _auto_merge_pr(pr_number: int) -> bool:
-    """Enable auto-merge for a single PR via the GitHub CLI.
-
-    Args:
-        pr_number: The GitHub PR number to merge.
+def _classify_pr_risk(branch: str, title: str) -> str:
+    """Heuristic risk classification for a PR.
 
     Returns:
-        True if the CLI reported success, False otherwise.
+        One of ``low``, ``medium``, or ``high``.
     """
-    try:
-        subprocess.run(
-            ["gh", "pr", "merge", str(pr_number), "--auto", "--merge"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return True
-    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-        logger.warning("Auto-merge failed for PR #%s: %s", pr_number, exc)
-        return False
+    lower_branch = branch.lower()
+    lower_title = title.lower()
+
+    # Low risk: member declarations, docs
+    if lower_branch.startswith("memora/member-") or lower_branch.startswith("docs/"):
+        return "low"
+
+    # High risk: optimizer suggestions, core logic changes
+    if lower_branch.startswith("memora-optimizer-") or lower_branch.startswith("memora-core-"):
+        return "high"
+
+    # Medium risk: feedback-driven prompt tweaks
+    if lower_branch.startswith("memora-feedback-"):
+        return "medium"
+
+    # Anything else involving evals or prompts
+    if "prompt" in lower_title or "eval" in lower_title or "routing" in lower_title:
+        return "high"
+
+    return "medium"
 
 
 def get_new_members(members_dir: str | Path, state_path: str | Path) -> list[dict[str, Any]]:
@@ -142,57 +150,69 @@ def send_new_member_alert(members_dir: str | Path, state_path: str | Path) -> No
 def send_digest() -> None:
     """Generate and send the CEO digest.
 
-    Fetches open PRs via the GitHub CLI, auto-merges safe branches
-    (``memora-feedback-*`` and ``memora-optimizer-*``), and logs a
-    summary of the remaining PRs awaiting approval.
+    Fetches open PRs via the GitHub CLI, classifies each by risk level,
+    and logs a summary of **all** PRs awaiting CEO approval.
+
+    **No PRs are merged automatically.** The CEO must review the digest
+    and approve each change individually.
     """
     prs = _fetch_open_prs()
 
-    auto_merge_prefixes = ("memora-feedback-", "memora-optimizer-")
-    auto_merged: list[tuple[dict[str, Any], bool]] = []
-    pending: list[dict[str, Any]] = []
+    if not prs:
+        logger.info("CEO Digest: No open PRs awaiting approval.")
+        return
+
+    # Classify and group PRs
+    low_risk: list[dict[str, Any]] = []
+    medium_risk: list[dict[str, Any]] = []
+    high_risk: list[dict[str, Any]] = []
 
     for pr in prs:
         branch = pr.get("headRefName", "")
-        if branch.startswith(auto_merge_prefixes):
-            success = _auto_merge_pr(pr["number"])
-            auto_merged.append((pr, success))
+        title = pr.get("title", "")
+        risk = _classify_pr_risk(branch, title)
+        if risk == "low":
+            low_risk.append(pr)
+        elif risk == "medium":
+            medium_risk.append(pr)
         else:
-            pending.append(pr)
+            high_risk.append(pr)
 
-    lines: list[str] = []
+    lines: list[str] = [
+        "╔══════════════════════════════════════════════════════════════╗",
+        "║              CEO Digest — Pending Approvals                  ║",
+        "╠══════════════════════════════════════════════════════════════╣",
+        "",
+        f"  Total PRs awaiting approval: {len(prs)}",
+        f"  • High risk : {len(high_risk)}",
+        f"  • Medium risk: {len(medium_risk)}",
+        f"  • Low risk  : {len(low_risk)}",
+        "",
+        "  No PRs are merged automatically. Review each below and run:",
+        "    gh pr merge <number> --merge",
+        "",
+    ]
 
-    if auto_merged:
-        lines.append("CEO Digest — Auto-merged PRs:")
-        lines.append("")
-        for pr, success in auto_merged:
-            status = "auto-merged" if success else "auto-merge failed"
-            author = pr.get("author", {}).get("login", "unknown")
-            lines.append(
-                f"  #{pr.get('number')} {pr.get('title')}\n"
-                f"     by {author} — {pr.get('url')} — {status}"
-            )
-
-    if pending:
-        if auto_merged:
-            lines.append("")
-        header = (
-            "CEO Digest — Open PRs awaiting approval:"
-            if not auto_merged
-            else "Open PRs awaiting approval:"
-        )
-        lines.append(header)
-        lines.append("")
-        for pr in pending:
+    def _render_section(header: str, prs_list: list[dict], emoji: str) -> None:
+        if not prs_list:
+            return
+        lines.append(f"{emoji} {header}")
+        lines.append("─" * (len(header) + 4))
+        for pr in prs_list:
             author = pr.get("author", {}).get("login", "unknown")
             lines.append(
                 f"  #{pr.get('number')} {pr.get('title')}\n"
                 f"     by {author} — {pr.get('url')}"
             )
+        lines.append("")
 
-    if not lines:
-        logger.info("CEO Digest: No open PRs awaiting approval.")
-        return
+    _render_section("HIGH RISK — Core logic / optimizer / prompts", high_risk, "🔴")
+    _render_section("MEDIUM RISK — Feedback-driven changes", medium_risk, "🟡")
+    _render_section("LOW RISK — Member declarations / docs", low_risk, "🟢")
+
+    lines.append(
+        "╚══════════════════════════════════════════════════════════════╝"
+    )
 
     digest = "\n".join(lines)
     logger.info("%s", digest)

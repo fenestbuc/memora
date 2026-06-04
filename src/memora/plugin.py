@@ -11,7 +11,6 @@ import json
 import logging
 from .cache import SqliteL1Cache
 from . import swarm_manager, triage, evaluations as _evaluations
-import hashlib
 import os
 import re
 import sqlite3
@@ -40,7 +39,6 @@ except ImportError:
         def get_tool_schemas(self) -> List[Dict[str, Any]]:
             return []
         def handle_tool_call(self, tool_name: str, args: Dict[str, Any], **kwargs) -> str:
-            raise NotImplementedError
             raise NotImplementedError
         def system_prompt_block(self) -> str:
             return ""
@@ -212,7 +210,7 @@ class MemoraProvider(MemoryProvider):
         self._config = kwargs.get("config", {})
         Path(self._hermes_home).mkdir(parents=True, exist_ok=True)
 
-        # Onboarding: prompt for profile if memora.json is missing
+        # Onboarding: warn if profile is missing (non-blocking)
         self._check_onboarding()
 
         # Read owner_id from profile
@@ -230,19 +228,22 @@ class MemoraProvider(MemoryProvider):
         # Auto-ingest flag gates sync_turn
         self._auto_ingest = self._config.get("auto_ingest", True)
 
-        # Auto-commit flag gates git commits after session end
-        self._auto_commit = self._config.get("auto_commit", True)
-        self._modified_files: set[Path] = set()
-
         # Auto-swarm flag gates kanban delegate task spawning on new facts
         self._auto_swarm = self._config.get("auto_swarm", False)
 
-        # Prefetch relevance threshold (P2: configurable)
+        # Prefetch relevance threshold
         self._prefetch_threshold = self._config.get("prefetch_threshold", 0.5)
 
         # SQLite write-behind queue — scoped by agent identity
         self._queue_path = Path(self._hermes_home) / f"memora_queue_{self._agent_identity}.db"
+
+        # Persistent SQLite connection (one per provider instance)
+        self._queue_conn = sqlite3.connect(self._queue_path, check_same_thread=False)
+        self._queue_conn.execute("PRAGMA journal_mode=WAL;")
+        self._queue_conn.execute("PRAGMA synchronous=NORMAL;")
+        self._queue_conn.execute("PRAGMA busy_timeout=5000;")
         self._init_queue()
+        self._load_seen_hashes()
 
         self._base_url = os.environ.get("RAG_WORKER_URL", _DEFAULT_URL).rstrip("/")
         self._token = os.environ.get("RAG_AUTH_TOKEN", _DEFAULT_TOKEN)
@@ -255,7 +256,7 @@ class MemoraProvider(MemoryProvider):
         self._circuit_open = False
         self._circuit_open_until = 0.0
 
-        # Metrics counters (P2: observability)
+        # Metrics counters
         self._metrics = {
             "facts_queued": 0,
             "facts_flushed": 0,
@@ -264,12 +265,6 @@ class MemoraProvider(MemoryProvider):
             "search_calls": 0,
             "circuit_opens": 0,
         }
-
-        self._init_queue()
-        self._load_seen_hashes()
-
-        self._base_url = os.environ.get("RAG_WORKER_URL", _DEFAULT_URL).rstrip("/")
-        self._token = os.environ.get("RAG_AUTH_TOKEN", _DEFAULT_TOKEN)
 
         # Verify RAG worker is reachable
         self._health_check()
@@ -286,17 +281,29 @@ class MemoraProvider(MemoryProvider):
             logger.warning("RAG worker health check failed: %s", e)
 
     def _check_onboarding(self) -> None:
-        """Run interactive onboarding if the local memora profile is missing."""
+        """Warn if onboarding has not been completed.
+
+        Does **not** block with interactive ``input()`` — that would hang
+        daemons, CI, and automation.  Users must run ``./install.sh`` or
+        ``python -m memora.onboarding`` explicitly beforehand.
+        """
         from . import onboarding as _onboarding
 
         if _onboarding.load_profile(hermes_home=self._hermes_home) is None:
-            _onboarding.run_onboarding(hermes_home=self._hermes_home)
+            logger.warning(
+                "Memora profile missing at %s. Run './install.sh' or "
+                "'python -m memora.onboarding' to set up your Digital Twin.",
+                Path(self._hermes_home) / "memora.json",
+            )
 
     def _init_queue(self) -> None:
-        conn = sqlite3.connect(self._queue_path)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA busy_timeout=5000;")
+        # Use persistent connection if available, otherwise create one temporarily
+        conn = getattr(self, "_queue_conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self._queue_path)
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA busy_timeout=5000;")
         conn.execute(
             """CREATE TABLE IF NOT EXISTS queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -347,18 +354,19 @@ class MemoraProvider(MemoryProvider):
             )"""
         )
         conn.commit()
-        conn.close()
+        if getattr(self, "_queue_conn", None) is None:
+            conn.close()
 
     def _load_seen_hashes(self) -> None:
         """Load previously queued content hashes from SQLite for cross-session dedup."""
-        conn = sqlite3.connect(self._queue_path)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.execute("PRAGMA synchronous=NORMAL;")
-        conn.execute("PRAGMA busy_timeout=5000;")
+        conn = getattr(self, "_queue_conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self._queue_path)
         cursor = conn.execute("SELECT hash FROM seen_hashes")
         for row in cursor:
             self._seen_hashes.add(row[0])
-        conn.close()
+        if getattr(self, "_queue_conn", None) is None:
+            conn.close()
 
     def system_prompt_block(self) -> str:
         return (
@@ -549,6 +557,10 @@ class MemoraProvider(MemoryProvider):
         self._stop_background_flush()
         self._flush_queue()
         self._vacuum_queue()
+        try:
+            self._queue_conn.close()
+        except Exception as e:
+            logger.debug("Queue connection close failed: %s", e)
         logger.info("MemoraProvider shutdown. Metrics: %s", self._metrics)
 
     def get_metrics(self) -> Dict[str, int]:
@@ -592,10 +604,9 @@ class MemoraProvider(MemoryProvider):
     def _vacuum_queue(self) -> None:
         """Run VACUUM on the SQLite queue to reclaim deleted space."""
         try:
+            # VACUUM cannot run inside a transaction, so we need a fresh connection
+            self._queue_conn.commit()
             conn = sqlite3.connect(self._queue_path)
-            conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute("PRAGMA synchronous=NORMAL;")
-            conn.execute("PRAGMA busy_timeout=5000;")
             conn.execute("VACUUM")
             conn.close()
             logger.debug("Vacuumed queue: %s", self._queue_path)
@@ -816,10 +827,14 @@ class MemoraProvider(MemoryProvider):
             if content_hash in self._seen_hashes:
                 return
             self._seen_hashes.add(content_hash)
-            conn = sqlite3.connect(self._queue_path)
-            conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute("PRAGMA synchronous=NORMAL;")
-            conn.execute("PRAGMA busy_timeout=5000;")
+            conn = getattr(self, "_queue_conn", None)
+            close_after = False
+            if conn is None:
+                conn = sqlite3.connect(self._queue_path)
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA synchronous=NORMAL;")
+                conn.execute("PRAGMA busy_timeout=5000;")
+                close_after = True
             # Persist hash for cross-session dedup
             conn.execute(
                 "INSERT OR IGNORE INTO seen_hashes (hash, created_at) VALUES (?, ?)",
@@ -830,7 +845,8 @@ class MemoraProvider(MemoryProvider):
                 ("add", category, content, self._session_id, datetime.now(timezone.utc).isoformat()),
             )
             conn.commit()
-            conn.close()
+            if close_after:
+                conn.close()
             self._metrics["facts_queued"] += 1
             # Mirror to local markdown memory
             self._write_local_memory(category, content)
@@ -858,16 +874,21 @@ class MemoraProvider(MemoryProvider):
         pass
     def _flush_queue(self, chunk_size: int = 100) -> None:
         with self._lock:
-            conn = sqlite3.connect(self._queue_path)
-            conn.execute("PRAGMA journal_mode=WAL;")
-            conn.execute("PRAGMA synchronous=NORMAL;")
-            conn.execute("PRAGMA busy_timeout=5000;")
+            conn = getattr(self, "_queue_conn", None)
+            close_after = False
+            if conn is None:
+                conn = sqlite3.connect(self._queue_path)
+                conn.execute("PRAGMA journal_mode=WAL;")
+                conn.execute("PRAGMA synchronous=NORMAL;")
+                conn.execute("PRAGMA busy_timeout=5000;")
+                close_after = True
             cursor = conn.execute(
                 "SELECT id, action, category, content, source_session, source_file, created_at FROM queue ORDER BY id"
             )
             all_rows = cursor.fetchall()
             if not all_rows:
-                conn.close()
+                if close_after:
+                    conn.close()
                 return
 
             ids_to_delete = []
@@ -924,7 +945,8 @@ class MemoraProvider(MemoryProvider):
                 placeholders = ",".join("?" * len(ids_to_delete))
                 conn.execute(f"DELETE FROM queue WHERE id IN ({placeholders})", ids_to_delete)
                 conn.commit()
-            conn.close()
+            if close_after:
+                conn.close()
             self._metrics["facts_flushed"] += facts_flushed_success
 
     def _extract_facts(self, messages: List[Dict[str, Any]]) -> None:

@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
-# Memora Enterprise Self-Install Script
+# Memora Self-Install Script
 #
 # Sets up a Digital Twin for a team member on a fresh workstation.
 # Performs strict interactive onboarding (name, role, company repo URL),
-# installs the Memora plugin, provisions a Cloudflare Tunnel for secure
-# webhook ingress, registers a systemd daemon, and (for CEOs) installs
-# nightly LLMOps optimizer + auto-merge hooks.
+# installs the Memora plugin, provisions a public tunnel for secure
+# webhook ingress, and registers a systemd daemon.
 #
 # Facts and golden eval datasets are stored as line-delimited JSON (.jsonl)
 # to eliminate git merge conflicts when multiple agents push concurrently.
@@ -41,7 +40,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     --help | -h)
       cat <<'EOF'
-Memora Enterprise Installer
+Memora Installer
 
 Sets up a Digital Twin for AI-native startup teams. The script performs
 strict interactive onboarding, installs the Memora Hermes plugin, clones
@@ -49,12 +48,11 @@ the company memory repository, and (on Linux) registers a systemd daemon.
 
 Key capabilities:
   • JSONL storage — Facts/eval datasets use .jsonl for zero-conflict git sync.
-  • Cloudflare Tunnel — Secure public webhook ingress via cloudflared.
+  • Public tunnel — Secure webhook ingress via cloudflared, ngrok, or localtunnel.
   • systemd daemonization — Background FastAPI listener (memora-daemon.service).
   • Strict onboarding — Requires first name, role, and company GitHub repo URL.
                      Halts with instructions if the repo URL is missing.
-  • CEO orchestration — Auto-merges safe PRs (memora-feedback-*, memora-optimizer-*)
-                        and registers the nightly LLMOps optimizer cron.
+  • CEO digest — Daily summary of pending PRs requiring human approval.
 
 Usage:
   ./install.sh [--name <first_name>] [--role <role>] [--repo <git_url>]
@@ -103,7 +101,7 @@ if [[ -z "$NAME" || -z "$ROLE" || -z "$COMPANY_REPO" ]]; then
   exit 1
 fi
 
-echo "==> Installing Memora Enterprise for $NAME ($ROLE)..."
+echo "==> Installing Memora for $NAME ($ROLE)..."
 
 # ---------------------------------------------------------------------------
 # 1. Install plugin to ~/.hermes/plugins/ if not already present
@@ -201,7 +199,7 @@ except subprocess.CalledProcessError as exc:
     print("\nGitHub sync failed.")
     print(
         "Please ensure you have authenticated with the GitHub CLI "
-        "(\`gh auth login\`) and have write access to the company repository."
+        "(\\`gh auth login\\`) and have write access to the company repository."
     )
     print(f"Original error: {exc}")
     sys.exit(1)
@@ -266,16 +264,56 @@ if [[ -f "$SCRIPT_DIR/docs/SKILL.md" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 7. CEO digest + nightly optimizer cron jobs
+# 7. Optional Linear integration
+# ---------------------------------------------------------------------------
+echo ""
+echo "Memora supports two Kanban backends:"
+echo "  1. Hermes native kanban (default) — works if Hermes CLI is installed."
+echo "  2. Linear — for teams not using Hermes."
+echo ""
+read -rp "Enable Linear integration? [y/N]: " enable_linear
+if [[ "$enable_linear" =~ ^[Yy]$ ]]; then
+  read -rsp "Linear API key (from https://linear.app/settings/account): " linear_key
+  echo ""
+  read -rp "Linear Team ID (optional, press Enter to skip): " linear_team
+
+  python3 <<PYEOF
+import os, yaml
+config_path = os.path.expanduser("$CONFIG_YAML")
+with open(config_path, "r") as f:
+    config = yaml.safe_load(f) or {}
+config.setdefault("linear", {})
+config["linear"]["api_key"] = "$linear_key"
+if "$linear_team":
+    config["linear"]["team_id"] = "$linear_team"
+with open(config_path, "w") as f:
+    yaml.dump(config, f, default_flow_style=False, sort_keys=False, allow_unicode=True)
+print("Linear credentials saved to config.yaml")
+PYEOF
+
+  # Set env var for current session
+  export MEMORA_KANBAN_BACKEND="linear"
+  echo "export MEMORA_KANBAN_BACKEND=linear" >> "$HERMES_HOME/memora_env.sh"
+  echo "export LINEAR_API_KEY=$linear_key" >> "$HERMES_HOME/memora_env.sh"
+  if [[ -n "$linear_team" ]]; then
+    echo "export LINEAR_TEAM_ID=$linear_team" >> "$HERMES_HOME/memora_env.sh"
+  fi
+  echo "==> Linear integration enabled."
+else
+  echo "==> Using Hermes native kanban (default)."
+fi
+
+# ---------------------------------------------------------------------------
+# 8. CEO digest + nightly evaluation cron jobs
 # ---------------------------------------------------------------------------
 ROLE_LOWER=$(echo "$ROLE" | tr '[:upper:]' '[:lower:]')
 if [[ "$ROLE_LOWER" == "ceo" ]]; then
-  echo "==> Role is CEO — installing nightly digest and LLMOps optimizer cron jobs..."
+  echo "==> Role is CEO — installing nightly digest and evaluation cron jobs..."
   mkdir -p "$WORKSPACE/logs"
 
-  # Daily digest (09:00) — includes auto-merge of safe memora-* PRs
+  # Daily digest (09:00) — CEO reviews pending PRs, NO auto-merge
   CRON_DIGEST="0 9 * * * cd $WORKSPACE && python3 -c \"from memora.ceo_digest import send_digest; send_digest()\" >> $WORKSPACE/logs/ceo_digest.log 2>&1"
-  # Nightly evaluation (02:00) — seeds the LLMOps optimizer flywheel
+  # Nightly evaluation (02:00) — generates suggestion PRs, NEVER auto-applies
   CRON_EVAL="0 2 * * * cd $WORKSPACE && memora-evals --golden data/eval_golden.jsonl -o reports/nightly_\$(date +\\%Y\\%m\\%d).json >> $WORKSPACE/logs/memora_evals.log 2>&1"
 
   # Remove any existing memora CEO lines to avoid duplicates
@@ -286,17 +324,17 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# 8. Install cloudflared (for tunnel support)
+# 9. Install tunnel tooling (cloudflared preferred, ngrok/localtunnel optional)
 # ---------------------------------------------------------------------------
 install_cloudflared() {
   if command -v cloudflared &>/dev/null; then
     echo "==> cloudflared already installed: $(command -v cloudflared)"
-    return
+    return 0
   fi
 
-  echo "==> cloudflared not found — downloading..."
+  echo "==> cloudflared not found — downloading with checksum verification..."
 
-  local os arch binary_name download_url bin_dir
+  local os arch binary_name checksum_url bin_dir expected_checksum
   os=$(uname -s)
   arch=$(uname -m)
 
@@ -305,34 +343,62 @@ install_cloudflared() {
       case "$arch" in
         x86_64|amd64) binary_name="cloudflared-linux-amd64" ;;
         aarch64|arm64) binary_name="cloudflared-linux-arm64" ;;
-        *) echo "Unsupported architecture: $arch" >&2; exit 1 ;;
+        *) echo "Unsupported architecture: $arch" >&2; return 1 ;;
       esac
       ;;
     Darwin)
       case "$arch" in
         x86_64|amd64) binary_name="cloudflared-darwin-amd64" ;;
         aarch64|arm64) binary_name="cloudflared-darwin-arm64" ;;
-        *) echo "Unsupported architecture: $arch" >&2; exit 1 ;;
+        *) echo "Unsupported architecture: $arch" >&2; return 1 ;;
       esac
       ;;
     *)
       echo "Unsupported OS: $os" >&2
-      exit 1
+      return 1
       ;;
   esac
 
   bin_dir="$HERMES_HOME/bin"
   mkdir -p "$bin_dir"
 
-  download_url="https://github.com/cloudflare/cloudflared/releases/latest/download/${binary_name}"
-  echo "    Downloading ${binary_name}..."
+  # Download latest release page to find the actual version
+  latest_url="https://github.com/cloudflare/cloudflared/releases/latest"
+  # Extract version from redirect URL
+  version=$(curl -sI "$latest_url" | grep -i "location:" | sed 's|.*/tag/||' | tr -d '\r')
+  if [[ -z "$version" ]]; then
+    echo "Warning: Could not determine latest cloudflared version. Skipping checksum verification." >&2
+    version="latest"
+  fi
+
+  download_url="https://github.com/cloudflare/cloudflared/releases/download/${version}/${binary_name}"
+  checksum_url="https://github.com/cloudflare/cloudflared/releases/download/${version}/${binary_name}.sha256"
+
+  echo "    Downloading ${binary_name} (${version})..."
   if command -v curl &>/dev/null; then
     curl -fsSL --retry 3 "$download_url" -o "$bin_dir/cloudflared"
+    if [[ "$version" != "latest" ]]; then
+      expected_checksum=$(curl -fsSL --retry 3 "$checksum_url" 2>/dev/null | awk '{print $1}')
+    fi
   elif command -v wget &>/dev/null; then
     wget -q --tries=3 "$download_url" -O "$bin_dir/cloudflared"
+    if [[ "$version" != "latest" ]]; then
+      expected_checksum=$(wget -q --tries=3 -O - "$checksum_url" 2>/dev/null | awk '{print $1}')
+    fi
   else
     echo "Error: curl or wget is required to download cloudflared." >&2
-    exit 1
+    return 1
+  fi
+
+  # Verify checksum if available
+  if [[ -n "$expected_checksum" ]]; then
+    actual_checksum=$(sha256sum "$bin_dir/cloudflared" | awk '{print $1}')
+    if [[ "$actual_checksum" != "$expected_checksum" ]]; then
+      echo "Error: cloudflared checksum mismatch! Expected $expected_checksum, got $actual_checksum" >&2
+      rm -f "$bin_dir/cloudflared"
+      return 1
+    fi
+    echo "    Checksum verified."
   fi
 
   chmod +x "$bin_dir/cloudflared"
@@ -342,7 +408,7 @@ install_cloudflared() {
 install_cloudflared
 
 # ---------------------------------------------------------------------------
-# 9. Daemon systemd service (Linux only)
+# 10. Daemon systemd service (Linux only)
 # ---------------------------------------------------------------------------
 if [[ "$(uname -s)" == "Linux" ]] && command -v systemctl &>/dev/null; then
   echo "==> Installing memora-daemon systemd service..."
@@ -359,16 +425,15 @@ if [[ "$(uname -s)" == "Linux" ]] && command -v systemctl &>/dev/null; then
   SERVICE_FILE="$SERVICE_DIR/memora-daemon.service"
   cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=Memora Background Daemon (Discord/MCP listeners + Cloudflare Tunnel)
+Description=Memora Background Daemon (Discord/MCP listeners + Public Tunnel)
 After=network.target
 
 [Service]
 Type=simple
-ExecStart=$(command -v python3) -m memora.daemon
+ExecStart=$(command -v python3) -m memora.daemon --tunnel cloudflared
 Restart=always
 RestartSec=5
 Environment=MEMORA_DAEMON_PORT=${DAEMON_PORT}
-Environment=MEMORA_TUNNEL=1
 Environment=PYTHONUNBUFFERED=1
 
 [Install]
@@ -395,22 +460,27 @@ fi
 # Done
 # ---------------------------------------------------------------------------
 echo ""
-echo "Memora Enterprise setup complete for $NAME ($ROLE)!"
+echo "Memora setup complete for $NAME ($ROLE)!"
 echo "  Company memory : $COMPANY_DIR"
 echo "  Plugin config  : $MEMORA_CONFIG"
 echo "  Hermes config  : $CONFIG_YAML"
 echo ""
 echo "Key features active:"
 echo "  • JSONL datasets — Conflict-free sync for facts and eval_golden.jsonl"
-echo "  • Cloudflare Tunnel — Public URL logged to ~/.hermes/memora_tunnel.txt"
+echo "  • Public tunnel  — Secure webhook ingress (cloudflared/trycloudflare.com)"
 echo "  • systemd daemon — Background webhook listener (memora-daemon.service)"
 if [[ "$ROLE_LOWER" == "ceo" ]]; then
-  echo "  • CEO auto-merge — Safe PRs (memora-feedback-*, memora-optimizer-*) merged automatically"
-  echo "  • Nightly optimizer — memora-evals runs at 02:00; scores < 95%% trigger prompt tuning"
+  echo "  • CEO digest     — Daily summary of pending PRs requiring your approval"
+  echo "  • Nightly evals  — memora-evals runs at 02:00; low scores generate suggestion PRs"
 fi
+echo ""
+echo "Tunnel alternatives (no domain needed):"
+echo "  • cloudflared --tunnel cloudflared   (default, free)"
+echo "  • ngrok       --tunnel ngrok         (requires ngrok account)"
+echo "  • localtunnel --tunnel localtunnel   (requires npm)"
 echo ""
 echo "Next steps:"
 echo "  1. Restart Hermes to load the updated configuration."
-echo "  2. Verify with: hermes-cli --check-config"
+echo "  2. Verify with: hermes-cli --check-config  (or check your agent's health)"
 echo "  3. Start collaborating — company facts sync via git PRs in .jsonl."
 echo "  4. (CEO) Review nightly eval reports in $WORKSPACE/logs/"

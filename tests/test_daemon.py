@@ -1,4 +1,4 @@
-"""Tests for Memora daemon (Phase 4, Task 4).
+"""Tests for Memora daemon.
 
 Run with: pytest tests/test_daemon.py -v
 """
@@ -7,8 +7,9 @@ from __future__ import annotations
 
 import json
 import os
-from io import StringIO
-from unittest.mock import MagicMock, patch
+import queue
+import subprocess
+from unittest.mock import MagicMock, Mock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -17,8 +18,10 @@ from memora.daemon import (
     app,
     parse_args,
     spawn_cloudflare_tunnel,
-    _resolve_cloudflared_binary,
-    _should_enable_tunnel,
+    spawn_ngrok_tunnel,
+    spawn_localtunnel,
+    _resolve_binary,
+    _spawn_subprocess_with_drain,
 )
 
 client = TestClient(app)
@@ -152,66 +155,70 @@ class TestParseArgs:
     def test_default_port(self):
         args = parse_args([])
         assert args.port == 8742
-        assert args.tunnel is False
+        assert args.tunnel == ""
 
-    def test_tunnel_flag(self):
-        args = parse_args(["--tunnel"])
-        assert args.tunnel is True
+    def test_tunnel_cloudflared(self):
+        args = parse_args(["--tunnel", "cloudflared"])
+        assert args.tunnel == "cloudflared"
+
+    def test_tunnel_ngrok(self):
+        args = parse_args(["--tunnel", "ngrok"])
+        assert args.tunnel == "ngrok"
 
     def test_custom_port(self):
         args = parse_args(["--port", "9000"])
         assert args.port == 9000
 
 
-class TestShouldEnableTunnel:
-    """Tests for tunnel enablement logic."""
-
-    def test_enabled_by_flag(self):
-        args = parse_args(["--tunnel"])
-        assert _should_enable_tunnel(args) is True
-
-    def test_disabled_by_default(self):
-        args = parse_args([])
-        assert _should_enable_tunnel(args) is False
-
-    @patch.dict(os.environ, {"MEMORA_TUNNEL": "1"})
-    def test_enabled_by_env(self):
-        args = parse_args([])
-        assert _should_enable_tunnel(args) is True
-
-    @patch.dict(os.environ, {"MEMORA_TUNNEL": "0"})
-    def test_disabled_by_env_zero(self):
-        args = parse_args([])
-        assert _should_enable_tunnel(args) is False
-
-
-class TestResolveCloudflaredBinary:
-    """Tests for cloudflared binary resolution."""
+class TestResolveBinary:
+    """Tests for binary resolution."""
 
     @patch("memora.daemon.os.path.isfile", return_value=True)
     def test_prefers_hermes_bin(self, mock_isfile):
-        path = _resolve_cloudflared_binary()
+        path = _resolve_binary("cloudflared", "cloudflared")
         assert path == os.path.expanduser("~/.hermes/bin/cloudflared")
 
-    @patch("memora.daemon.os.path.isfile", return_value=False)
-    def test_falls_back_to_path(self, mock_isfile):
-        path = _resolve_cloudflared_binary()
+    @patch("memora.daemon.subprocess.run")
+    def test_falls_back_to_path(self, mock_run):
+        mock_run.return_value = Mock(returncode=0)
+        path = _resolve_binary("cloudflared")
         assert path == "cloudflared"
+
+
+class TestSpawnSubprocessWithDrain:
+    """Tests for deadlock-safe subprocess spawning."""
+
+    @patch("memora.daemon.subprocess.Popen")
+    def test_drains_stdout_and_stderr(self, mock_popen):
+        mock_proc = MagicMock()
+        mock_proc.stdout = MagicMock()
+        mock_proc.stdout.readline = MagicMock(side_effect=["line1\n", "line2\n", ""])
+        mock_proc.stderr = MagicMock()
+        mock_proc.stderr.readline = MagicMock(side_effect=["err1\n", ""])
+        mock_popen.return_value = mock_proc
+
+        proc, output_queue = _spawn_subprocess_with_drain(["echo", "test"])
+        # Give daemon threads a moment to drain
+        import time
+        time.sleep(0.1)
+
+        assert proc == mock_proc
+        assert not output_queue.empty()
 
 
 class TestSpawnCloudflareTunnel:
     """Tests for cloudflared subprocess spawning."""
 
-    @patch("memora.daemon.subprocess.Popen")
-    def test_writes_tunnel_url_and_logs(self, mock_popen, tmp_path):
-        """When stderr contains a trycloudflare.com URL, write it to file."""
-        fake_stderr = StringIO(
-            "INF Connection registered connIndex=0 location=SIN\n"
-            "INF |  https://abc123.trycloudflare.com  |\n"
-        )
-        proc = MagicMock()
-        proc.stderr = fake_stderr
-        mock_popen.return_value = proc
+    @patch("memora.daemon._resolve_binary", return_value="/fake/cloudflared")
+    @patch("memora.daemon._spawn_subprocess_with_drain")
+    def test_writes_tunnel_url_and_logs(self, mock_spawn, mock_resolve, tmp_path):
+        """When output contains a trycloudflare.com URL, write it to file."""
+        q = queue.Queue()
+        q.put("INF Connection registered connIndex=0 location=SIN")
+        q.put("INF |  https://abc123.trycloudflare.com  |")
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_spawn.return_value = (mock_proc, q)
 
         hermes_home = tmp_path / ".hermes"
         with patch(
@@ -220,30 +227,84 @@ class TestSpawnCloudflareTunnel:
             spawn_cloudflare_tunnel(8742)
 
         tunnel_file = hermes_home / "memora_tunnel.txt"
-        assert tunnel_file.read_text() == "https://abc123.trycloudflare.com"
+        assert tunnel_file.exists()
+        assert "https://abc123.trycloudflare.com" in tunnel_file.read_text()
 
-    @patch("memora.daemon.subprocess.Popen")
-    def test_no_url_terminates_process(self, mock_popen):
+    @patch("memora.daemon._resolve_binary", return_value="/fake/cloudflared")
+    @patch("memora.daemon._spawn_subprocess_with_drain")
+    def test_no_url_terminates_process(self, mock_spawn, mock_resolve):
         """When no tunnel URL appears, terminate the process."""
-        fake_stderr = StringIO("Some irrelevant log line\n")
-        proc = MagicMock()
-        proc.stderr = fake_stderr
-        mock_popen.return_value = proc
+        q = queue.Queue()
+        q.put("Some irrelevant log line")
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = 1  # process exited
+        mock_spawn.return_value = (mock_proc, q)
 
         spawn_cloudflare_tunnel(8742)
+        mock_proc.terminate.assert_called_once()
 
-        proc.terminate.assert_called_once()
-
-    @patch("memora.daemon.subprocess.Popen")
-    def test_file_not_found_logged(self, mock_popen, caplog):
+    @patch("memora.daemon._resolve_binary", return_value=None)
+    def test_binary_not_found_logged(self, mock_resolve, caplog):
         """If cloudflared binary is missing, log an error and return."""
-        mock_popen.side_effect = FileNotFoundError("No such file")
+        with caplog.at_level("ERROR", logger="memora.daemon"):
+            spawn_cloudflare_tunnel(8742)
 
+        assert "cloudflared not found" in caplog.text
+
+
+class TestSpawnNgrokTunnel:
+    """Tests for ngrok subprocess spawning."""
+
+    @patch("memora.daemon._resolve_binary", return_value="/fake/ngrok")
+    @patch("memora.daemon._spawn_subprocess_with_drain")
+    def test_writes_ngrok_url(self, mock_spawn, mock_resolve, tmp_path):
+        q = queue.Queue()
+        q.put("msg=tunnel started url=https://abc.ngrok-free.app")
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_spawn.return_value = (mock_proc, q)
+
+        hermes_home = tmp_path / ".hermes"
         with patch(
-            "memora.daemon._resolve_cloudflared_binary",
-            return_value="/fake/cloudflared",
+            "memora.daemon.os.path.expanduser", return_value=str(hermes_home)
         ):
-            with caplog.at_level("ERROR", logger="memora.daemon"):
-                spawn_cloudflare_tunnel(8742)
+            spawn_ngrok_tunnel(8742)
 
-        assert "cloudflared binary not found" in caplog.text
+        tunnel_file = hermes_home / "memora_tunnel.txt"
+        assert tunnel_file.exists()
+        assert "https://abc.ngrok-free.app" in tunnel_file.read_text()
+
+    @patch("memora.daemon._resolve_binary", return_value=None)
+    def test_ngrok_not_found(self, mock_resolve, caplog):
+        with caplog.at_level("ERROR", logger="memora.daemon"):
+            spawn_ngrok_tunnel(8742)
+        assert "ngrok not found" in caplog.text
+
+
+class TestSpawnLocaltunnel:
+    """Tests for localtunnel subprocess spawning."""
+
+    @patch("memora.daemon._resolve_binary", return_value="/fake/lt")
+    @patch("memora.daemon._spawn_subprocess_with_drain")
+    def test_writes_loca_lt_url(self, mock_spawn, mock_resolve, tmp_path):
+        q = queue.Queue()
+        q.put("your url is: https://abc.loca.lt")
+        mock_proc = MagicMock()
+        mock_proc.poll.return_value = None
+        mock_spawn.return_value = (mock_proc, q)
+
+        hermes_home = tmp_path / ".hermes"
+        with patch(
+            "memora.daemon.os.path.expanduser", return_value=str(hermes_home)
+        ):
+            spawn_localtunnel(8742)
+
+        tunnel_file = hermes_home / "memora_tunnel.txt"
+        assert tunnel_file.exists()
+        assert "https://abc.loca.lt" in tunnel_file.read_text()
+
+    @patch("memora.daemon._resolve_binary", return_value=None)
+    def test_lt_not_found(self, mock_resolve, caplog):
+        with caplog.at_level("ERROR", logger="memora.daemon"):
+            spawn_localtunnel(8742)
+        assert "localtunnel (lt) not found" in caplog.text

@@ -10,10 +10,12 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import queue
 import re
 import subprocess
 import sys
 import threading
+import time
 from typing import Any, Callable, Dict
 
 from fastapi import FastAPI, Request
@@ -119,48 +121,89 @@ async def discord_query(request: Request) -> JSONResponse:
 
 
 # ---------------------------------------------------------------------------
-# Tunnel support
+# Tunnel support — pluggable backends
 # ---------------------------------------------------------------------------
 
-TUNNEL_REGEX = re.compile(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com")
+TUNNEL_REGEX = re.compile(r"https://[a-zA-Z0-9-]+\.(trycloudflare\.com|loca\.lt|ngrok-free\.app)")
 
 
-def _resolve_cloudflared_binary() -> str:
-    """Return the path to the cloudflared binary.
+def _drain_stream(stream, output_queue: queue.Queue[str]) -> None:
+    """Read lines from *stream* and push them into *output_queue*."""
+    try:
+        for line in iter(stream.readline, ""):
+            output_queue.put(line.strip())
+    except Exception:
+        pass
+    finally:
+        stream.close()
 
-    Prefers ~/.hermes/bin/cloudflared (where install.sh drops it) and
-    falls back to whatever is on $PATH.
+
+def _spawn_subprocess_with_drain(cmd: list[str]) -> tuple[subprocess.Popen, queue.Queue[str]]:
+    """Spawn *cmd* and drain both stdout and stderr into a thread-safe queue.
+
+    Prevents pipe-buffer deadlocks that occur when a subprocess fills a
+    pipe (64 KB default) before the parent reads from it.
     """
-    hermes_bin = os.path.expanduser("~/.hermes/bin/cloudflared")
-    if os.path.isfile(hermes_bin):
-        return hermes_bin
-    return "cloudflared"
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    output_queue: queue.Queue[str] = queue.Queue()
+
+    # Start daemon threads to drain both streams concurrently
+    threading.Thread(
+        target=_drain_stream, args=(proc.stdout, output_queue), daemon=True
+    ).start()
+    threading.Thread(
+        target=_drain_stream, args=(proc.stderr, output_queue), daemon=True
+    ).start()
+
+    return proc, output_queue
+
+
+def _resolve_binary(name: str, hermes_subpath: str = "") -> str | None:
+    """Resolve a binary path.
+
+    Prefers ``~/.hermes/bin/<name>`` when *hermes_subpath* is provided,
+    then falls back to ``$PATH``.
+    """
+    if hermes_subpath:
+        hermes_bin = os.path.expanduser(f"~/.hermes/bin/{hermes_subpath}")
+        if os.path.isfile(hermes_bin):
+            return hermes_bin
+    return name if subprocess.run(["which", name], capture_output=True).returncode == 0 else None
 
 
 def spawn_cloudflare_tunnel(port: int) -> None:
-    """Run cloudflared and capture the trycloudflare.com URL from stderr.
+    """Run cloudflared and capture the public URL.
 
-    Writes the discovered URL to ~/.hermes/memora_tunnel.txt and logs it.
+    Uses the ephemeral ``trycloudflare.com`` service — **no Cloudflare
+    domain or account required**.
     """
-    binary = _resolve_cloudflared_binary()
+    binary = _resolve_binary("cloudflared", "cloudflared")
+    if binary is None:
+        logger.error(
+            "cloudflared not found. Install it or choose a different tunnel provider."
+        )
+        return
+
     cmd = [binary, "tunnel", "--url", f"http://localhost:{port}"]
     logger.info("Spawning cloudflared tunnel: %s", " ".join(cmd))
 
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-    except FileNotFoundError:
-        logger.error("cloudflared binary not found: %s", binary)
-        return
-
+    proc, output_queue = _spawn_subprocess_with_drain(cmd)
     tunnel_url: str | None = None
-    # cloudflared prints the public URL in its log output on stderr.
-    for line in proc.stderr:  # type: ignore[union-attr]
-        line = line.strip()
+    deadline = time.time() + 30.0
+
+    while time.time() < deadline:
+        try:
+            line = output_queue.get(timeout=1.0)
+        except queue.Empty:
+            if proc.poll() is not None:
+                break
+            continue
+
         logger.debug("cloudflared output: %s", line)
         match = TUNNEL_REGEX.search(line)
         if match:
@@ -168,26 +211,114 @@ def spawn_cloudflare_tunnel(port: int) -> None:
             break
 
     if tunnel_url:
-        hermes_home = os.path.expanduser("~/.hermes")
-        os.makedirs(hermes_home, exist_ok=True)
-        tunnel_file = os.path.join(hermes_home, "memora_tunnel.txt")
-        with open(tunnel_file, "w") as f:
-            f.write(tunnel_url)
-        logger.info(
-            "Cloudflare tunnel active: %s (written to %s)",
-            tunnel_url,
-            tunnel_file,
-        )
+        _save_tunnel_url(tunnel_url, provider="cloudflared")
     else:
-        logger.warning(
-            "Could not discover tunnel URL from cloudflared output."
-        )
+        logger.warning("Could not discover tunnel URL from cloudflared output.")
         proc.terminate()
 
 
-def _should_enable_tunnel(args: argparse.Namespace) -> bool:
-    """Return True if tunnel mode should be enabled."""
-    return args.tunnel or os.environ.get("MEMORA_TUNNEL", "") == "1"
+def spawn_ngrok_tunnel(port: int) -> None:
+    """Run ngrok and capture the public URL.
+
+    Requires ``ngrok`` to be installed and (for free tier) authtoken
+    configured via ``ngrok config add-authtoken <token>``.
+    """
+    binary = _resolve_binary("ngrok")
+    if binary is None:
+        logger.error(
+            "ngrok not found. Install it from https://ngrok.com/download "
+            "or choose a different tunnel provider."
+        )
+        return
+
+    cmd = [binary, "http", str(port), "--log=stdout"]
+    logger.info("Spawning ngrok tunnel: %s", " ".join(cmd))
+
+    proc, output_queue = _spawn_subprocess_with_drain(cmd)
+    tunnel_url: str | None = None
+    deadline = time.time() + 30.0
+
+    # ngrok free tier URLs: https://xxxx.ngrok-free.app
+    ngrok_re = re.compile(r"https://[a-zA-Z0-9-]+\.ngrok-free\.app")
+
+    while time.time() < deadline:
+        try:
+            line = output_queue.get(timeout=1.0)
+        except queue.Empty:
+            if proc.poll() is not None:
+                break
+            continue
+
+        logger.debug("ngrok output: %s", line)
+        match = ngrok_re.search(line)
+        if match:
+            tunnel_url = match.group(0)
+            break
+
+    if tunnel_url:
+        _save_tunnel_url(tunnel_url, provider="ngrok")
+    else:
+        logger.warning("Could not discover tunnel URL from ngrok output.")
+        proc.terminate()
+
+
+def spawn_localtunnel(port: int) -> None:
+    """Run localtunnel (lt) and capture the public URL.
+
+    Requires ``lt`` to be installed (``npm install -g localtunnel``).
+    """
+    binary = _resolve_binary("lt")
+    if binary is None:
+        logger.error(
+            "localtunnel (lt) not found. Install it with: npm install -g localtunnel "
+            "or choose a different tunnel provider."
+        )
+        return
+
+    cmd = [binary, "--port", str(port)]
+    logger.info("Spawning localtunnel: %s", " ".join(cmd))
+
+    proc, output_queue = _spawn_subprocess_with_drain(cmd)
+    tunnel_url: str | None = None
+    deadline = time.time() + 30.0
+
+    # localtunnel URLs: https://xxxx.loca.lt
+    lt_re = re.compile(r"https://[a-zA-Z0-9-]+\.loca\.lt")
+
+    while time.time() < deadline:
+        try:
+            line = output_queue.get(timeout=1.0)
+        except queue.Empty:
+            if proc.poll() is not None:
+                break
+            continue
+
+        logger.debug("localtunnel output: %s", line)
+        match = lt_re.search(line)
+        if match:
+            tunnel_url = match.group(0)
+            break
+
+    if tunnel_url:
+        _save_tunnel_url(tunnel_url, provider="localtunnel")
+    else:
+        logger.warning("Could not discover tunnel URL from localtunnel output.")
+        proc.terminate()
+
+
+def _save_tunnel_url(url: str, provider: str) -> None:
+    """Persist the discovered tunnel URL to disk."""
+    hermes_home = os.path.expanduser("~/.hermes")
+    os.makedirs(hermes_home, exist_ok=True)
+    tunnel_file = os.path.join(hermes_home, "memora_tunnel.txt")
+    with open(tunnel_file, "w") as f:
+        f.write(f"{url}\n")
+    logger.info(
+        "%s tunnel active: %s (written to %s)",
+        provider,
+        url,
+        tunnel_file,
+    )
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -195,8 +326,14 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Memora Daemon")
     parser.add_argument(
         "--tunnel",
-        action="store_true",
-        help="Expose daemon via a Cloudflare tunnel (also set MEMORA_TUNNEL=1)",
+        choices=["cloudflared", "ngrok", "localtunnel"],
+        default=os.environ.get("MEMORA_TUNNEL", ""),
+        help=(
+            "Expose daemon via a public tunnel.  "
+            "cloudflared = free, no account needed (default); "
+            "ngrok = requires ngrok account; "
+            "localtunnel = requires npm."
+        ),
     )
     parser.add_argument(
         "--port",
@@ -218,13 +355,22 @@ def main(argv: list[str] | None = None) -> None:
         format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
     )
 
-    if _should_enable_tunnel(args):
-        tunnel_thread = threading.Thread(
-            target=spawn_cloudflare_tunnel,
-            args=(args.port,),
-            daemon=True,
-        )
-        tunnel_thread.start()
+    if args.tunnel:
+        tunnel_map = {
+            "cloudflared": spawn_cloudflare_tunnel,
+            "ngrok": spawn_ngrok_tunnel,
+            "localtunnel": spawn_localtunnel,
+        }
+        spawner = tunnel_map.get(args.tunnel)
+        if spawner:
+            tunnel_thread = threading.Thread(
+                target=spawner,
+                args=(args.port,),
+                daemon=True,
+            )
+            tunnel_thread.start()
+        else:
+            logger.error("Unknown tunnel provider: %s", args.tunnel)
 
     uvicorn.run(app, host="0.0.0.0", port=args.port)
 

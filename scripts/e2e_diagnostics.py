@@ -84,11 +84,12 @@ def main() -> int:
     # ------------------------------------------------------------------
     with patch.object(swarm_manager, "kanban_create") as mock_kanban:
         mock_kanban.return_value = {"task_id": "e2e-swarm-1"}
-        with patch("memora.plugin.urllib.request.urlopen", return_value=mock_resp):
-            result = provider.handle_tool_call(
-                "memora_add",
-                {"content": "E2E test strategy insight.", "category": "strategy"},
-            )
+        with patch("memora.plugin.triage.should_trigger_swarm", return_value=True):
+            with patch("memora.plugin.urllib.request.urlopen", return_value=mock_resp):
+                result = provider.handle_tool_call(
+                    "memora_add",
+                    {"content": "E2E test strategy insight.", "category": "strategy"},
+                )
 
         if not mock_kanban.called:
             print("[FAIL] Swarm task was not triggered")
