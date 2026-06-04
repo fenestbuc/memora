@@ -172,7 +172,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
                 [
                     "wrangler", "d1", "execute", database_name,
                     "--command",
-                    f"INSERT INTO _migrations (version, name, checksum) VALUES ({seq}, '{name.replace(\"'\", \"''\")}', '{checksum}')",
+                    f"INSERT INTO _migrations (version, name, checksum) VALUES ({seq}, '{name.replace(chr(39), chr(39)+chr(39))}', '{checksum}')",
                 ],
                 check=True,
                 cwd=WRANGLER_TOML.parent,
