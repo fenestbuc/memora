@@ -24,6 +24,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
+from .http_client import HttpClient, HttpConfig
+from .fact_extractor import extract_facts as _extract_facts_module
+from .memory_mirror import write as _mirror_write
+from .tool_dispatcher import dispatch, search_cache_key
+
 try:
     from agent.memory_provider import MemoryProvider
 except ImportError:
@@ -174,6 +179,7 @@ class MemoraProvider(MemoryProvider):
         self._auto_swarm = False
         self._owner_id = "anonymous"
         self._auto_commit = False
+        self._http = None
 
     @property
     def worker_url(self) -> str:
@@ -250,6 +256,13 @@ class MemoraProvider(MemoryProvider):
 
         self._base_url = os.environ.get("RAG_WORKER_URL", _DEFAULT_URL).rstrip("/")
         self._token = os.environ.get("RAG_AUTH_TOKEN", _DEFAULT_TOKEN)
+        self._http = _MemoraHttpClient(
+            HttpConfig(
+                base_url=self._base_url,
+                token=self._token,
+                user_agent="hermes-rag-client/1.0",
+            )
+        )
         self._lock = threading.Lock()
         self._seen_hashes: set[str] = set()
         self._flush_thread: threading.Thread | None = None
@@ -513,42 +526,15 @@ class MemoraProvider(MemoryProvider):
             self._queue_add("feedback", json.dumps(correction))
             return json.dumps({"status": "feedback_captured", "correction": correction})
 
-        action_map = {
-            "memora_search": lambda: ("/search", {
-                "query": args["query"],
-                "top_k": args.get("top_k", 10),
-                "owner_id": self._owner_id,
-                **({"use_reranking": args["use_reranking"]} if "use_reranking" in args else {}),
-                **({"parent_id": args["parent_id"]} if "parent_id" in args else {}),
-                **({"scope": args["scope"]} if "scope" in args else {}),
-            }),
-            "memora_list": lambda: ("/memory/list", {k: v for k, v in args.items() if v is not None}),
-            "memora_add": lambda: ("/memory/add", {
-                "content": args["content"],
-                "category": args.get("category", "memory"),
-                "owner_id": self._owner_id,
-                **({"parent_id": args["parent_id"]} if "parent_id" in args else {}),
-                **({"id": args["id"]} if "id" in args else {}),
-            }),
-            "memora_update": lambda: ("/memory/update", {
-                "id": args["id"],
-                **({"content": args["content"]} if "content" in args else {}),
-                **({"category": args["category"]} if "category" in args else {}),
-            }),
-            "memora_delete": lambda: ("/memory/delete", {"ids": args.get("ids", [])}),
-            "memora_stats": lambda: ("/memory/stats", None),
-        }
-        if tool_name not in action_map:
+        try:
+            path, body = dispatch(tool_name, args, owner_id=self._owner_id)
+        except NotImplementedError:
             raise NotImplementedError(f"Provider {self.name} does not handle tool {tool_name}")
 
-        path, body = action_map[tool_name]()
-        
         # Local L1 Cache logic
         cache_key = None
         if tool_name == "memora_search":
-            hasher = hashlib.sha256()
-            hasher.update(json.dumps(body, sort_keys=True).encode("utf-8"))
-            cache_key = f"search:{hasher.hexdigest()}"
+            cache_key = search_cache_key(body)
             cached_result = self._l1_cache.get(cache_key)
             if cached_result is not None:
                 self._metrics["search_calls"] += 1
@@ -870,21 +856,13 @@ class MemoraProvider(MemoryProvider):
             self._write_local_memory(category, content)
 
     def _write_local_memory(self, category: str, content: str) -> None:
-        """Mirror queued fact to a local markdown file.
-
-        Each category gets its own ``.md`` file under ``self._memory_dir``.
-        Entries are appended so the file grows monotonically.
-        """
-        if self._memory_dir is None:
-            return
-        safe_category = category.lower().replace(" ", "_")
-        file_path = self._memory_dir / f"{safe_category}.md"
-        file_path.parent.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now(timezone.utc).isoformat()
-        session = getattr(self, "_session_id", "unknown")
-        entry = f"- [{timestamp}] [{session}] {content}\n"
-        with open(file_path, "a", encoding="utf-8") as f:
-            f.write(entry)
+        """Mirror queued fact to a local markdown file."""
+        _mirror_write(
+            self._memory_dir,
+            category,
+            content,
+            session_id=getattr(self, "_session_id", "unknown"),
+        )
 
     def _commit_memory_files(self) -> None:
         """DEPRECATED: Markdown auto-commits are disabled."""
@@ -968,51 +946,9 @@ class MemoraProvider(MemoryProvider):
             self._metrics["facts_flushed"] += facts_flushed_success
 
     def _extract_facts(self, messages: List[Dict[str, Any]]) -> None:
-        """Extract preference-like messages and key decisions from conversation.
-
-        Uses expanded keyword heuristics, imperative commands, and structural patterns.
-        Filters out short, URL-only, and code-block messages to reduce noise.
-        """
-        # Expanded indicators beyond simple keywords
-        _KEYWORDS = (
-            "prefer", "want", "need", "must not", "always", "never",
-            "decided", "decision", "should", "should not", "important",
-            "critical", "do not", "avoid", "ensure", "make sure",
-        )
-        # Imperative command patterns (first word is a directive verb)
-        _COMMAND_VERBS = (
-            "use", "send", "format", "schedule", "set", "enable", "disable",
-            "include", "exclude", "follow", "apply", "implement",
-        )
-        # Patterns to skip
-        _URL_RE = re.compile(r"^https?://\S+$")
-        _CODE_BLOCK_RE = re.compile(r"^```")
-
-        for msg in messages:
-            content = msg.get("content", "")
-            if not content:
-                continue
-            stripped = content.strip()
-            # Skip very short, URL-only, or code-block messages
-            if len(stripped) < 30:
-                continue
-            if _URL_RE.match(stripped):
-                continue
-            if _CODE_BLOCK_RE.search(stripped):
-                continue
-
-            lower = stripped.lower()
-
-            # Keyword-based extraction
-            if any(k in lower for k in _KEYWORDS):
-                self._queue_add("memory", f"Key fact: {stripped[:800]}")
-                continue
-
-            # Imperative command extraction: verb at start of sentence
-            first_sentence = re.split(r"[.!?]", stripped)[0].strip()
-            first_word = first_sentence.split()[0].lower() if first_sentence.split() else ""
-            if first_word in _COMMAND_VERBS and len(stripped) > 15:
-                self._queue_add("memory", f"Key fact: {stripped[:800]}")
+        """Extract preference-like messages and key decisions from conversation."""
+        for fact in _extract_facts_module(messages):
+            self._queue_add("memory", fact)
 
     def _request(self, path: str, body: dict = None, method: str = "POST",
                  max_retries: int = 3, base_delay: float = 1.0) -> dict:
@@ -1025,61 +961,38 @@ class MemoraProvider(MemoryProvider):
                 self._circuit_open = False
                 self._consecutive_failures = 0
 
-        url = f"{self._base_url}{path}"
-        data = json.dumps(body).encode("utf-8") if body else None
-        last_exc = None
-
-        for attempt in range(max_retries + 1):
-            req = urllib.request.Request(
-                url,
-                data=data,
-                headers={
-                    "Authorization": f"Bearer {self._token}",
-                    "Content-Type": "application/json",
-                    "User-Agent": "hermes-rag-client/1.0",
-                },
-                method=method,
+        http = _MemoraHttpClient(
+            HttpConfig(
+                base_url=self._base_url,
+                token=self._token,
+                max_retries=max_retries,
+                base_delay=base_delay,
+                user_agent="hermes-rag-client/1.0",
             )
-            try:
-                with urllib.request.urlopen(req, timeout=30) as resp:
-                    result = json.loads(resp.read().decode("utf-8"))
-                    # Reset circuit breaker on success
-                    self._consecutive_failures = 0
-                    return result
-            except (urllib.error.HTTPError, urllib.error.URLError) as e:
-                last_exc = e
-                # Retry on 5xx server errors, connection issues, and rate limits (429)
-                should_retry = False
-                if isinstance(e, urllib.error.HTTPError):
-                    if e.code >= 500 or e.code == 429:
-                        should_retry = True
-                else:
-                    should_retry = True
+        )
 
-                if not should_retry or attempt == max_retries:
-                    self._consecutive_failures += 1
-                    if self._consecutive_failures >= 3:
-                        self._circuit_open = True
-                        self._circuit_open_until = time.time() + 60.0
-                        self._metrics["circuit_opens"] += 1
-                        logger.warning("RAG worker circuit breaker opened after %d failures", self._consecutive_failures)
-                    raise
+        try:
+            if method == "GET":
+                result = http.get(path)
+            else:
+                result = http.post(path, body)
+            self._consecutive_failures = 0
+            return result
+        except Exception:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= 3:
+                self._circuit_open = True
+                self._circuit_open_until = time.time() + 60.0
+                self._metrics["circuit_opens"] += 1
+                logger.warning("RAG worker circuit breaker opened after %d failures", self._consecutive_failures)
+            raise
 
-                delay = base_delay * (2 ** attempt)
-                logger.debug("RAG request failed (attempt %d/%d), retrying in %.1fs: %s",
-                             attempt + 1, max_retries + 1, delay, e)
-                time.sleep(delay)
-            except Exception:
-                # Non-retryable (e.g., JSON parse after successful HTTP)
-                self._consecutive_failures += 1
-                if self._consecutive_failures >= 3:
-                    self._circuit_open = True
-                    self._circuit_open_until = time.time() + 60.0
-                    self._metrics["circuit_opens"] += 1
-                raise
 
-        # Should never reach here, but satisfy type checker
-        raise last_exc  # type: ignore[misc]
+class _MemoraHttpClient(HttpClient):
+    """HttpClient whose circuit breaker is managed by MemoraProvider."""
+
+    def _trip_breaker(self) -> None:
+        pass
 
 
 def register(ctx) -> None:

@@ -27,19 +27,16 @@ def apply_decay(
     conn: sqlite3.Connection,
     half_life_days: float = 90.0,
     archive_threshold: float = 0.15,
-    batch_size: int = 500,
 ) -> dict[str, int]:
     """Apply exponential decay to all non-archived facts and archive those
     that fall below the threshold.
 
     Also scores any un-scored facts using the LLM heuristic before decaying.
-    Processes facts in batches until none remain.
 
     Args:
         conn: SQLite connection to the RAG queue or a local mirror DB.
         half_life_days: Number of days for importance to halve.
         archive_threshold: Facts scoring below this after decay are archived.
-        batch_size: Process in batches to avoid long-running transactions.
 
     Returns:
         Dict with counts: ``{"scored": int, "decayed": int, "archived": int}``
@@ -47,25 +44,17 @@ def apply_decay(
     lambda_ = math.log(2) / half_life_days
     now = datetime.now(timezone.utc)
     stats = {"scored": 0, "decayed": 0, "archived": 0}
-    total_batches = 0
 
-    while True:
-        cursor = conn.execute(
-            """
-            SELECT id, content, category, importance_score, updated_at, archived
-            FROM facts
-            WHERE archived = 0 OR archived IS NULL
-            ORDER BY updated_at
-            LIMIT ?
-            """,
-            (batch_size,),
-        )
-        rows = cursor.fetchall()
-        if not rows:
-            break
+    cursor = conn.execute(
+        """
+        SELECT id, content, category, importance_score, updated_at, archived
+        FROM facts
+        WHERE archived = 0 OR archived IS NULL
+        """
+    )
+    rows = cursor.fetchall()
 
-        total_batches += 1
-        for row in rows:
+    for row in rows:
             fact_id, content, category, current_score, updated_at_str, _archived = row
 
             # Score un-scored facts
@@ -109,14 +98,15 @@ def apply_decay(
                 )
                 stats["decayed"] += 1
 
-        conn.commit()
+    conn.commit()
 
-    if total_batches == 0:
+    total = stats["scored"] + stats["decayed"] + stats["archived"]
+    if total == 0:
         logger.info("No facts eligible for decay")
     else:
         logger.info(
-            "Decay complete (%d batches): scored=%d, decayed=%d, archived=%d",
-            total_batches, stats["scored"], stats["decayed"], stats["archived"]
+            "Decay complete: scored=%d, decayed=%d, archived=%d",
+            stats["scored"], stats["decayed"], stats["archived"]
         )
     return stats
 
