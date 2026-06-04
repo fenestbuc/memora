@@ -124,6 +124,7 @@ docker compose up
 | `memora-weekly` | Generate weekly digest |
 | `memora-evals` | Run routing accuracy evaluation |
 | `memora-migrate` | Manage Cloudflare D1 schema migrations |
+| `memora-sync` | Sync facts from RAG, compile Markdown Wiki, and push to company repo |
 
 ---
 
