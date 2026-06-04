@@ -39,6 +39,7 @@ memora-nightly = "memora.nightly_brain:main"
 memora-weekly = "memora.weekly_digest:main"
 memora-evals = "memora.run_evals:main"
 memora-migrate = "memora.rag_migrate:main"
+memora-sync = "memora.repo_sync:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
