@@ -20,6 +20,7 @@ sys.path.insert(0, str(_scripts))
 from memora.brain_indexer import scan_workspace, index_sessions
 from memora.wiki_ingester import init_wiki, ingest_session, lint_wiki
 from memora.conflict_detector import detect_conflicts
+from memora.decay import apply_decay_to_queue_db
 
 _MAX_RETRIES = 2
 
@@ -127,15 +128,29 @@ def main(workspace_path: str | None = None):
 
     # 5. Evaluate RAG Backend
     print("[5/5] Evaluating RAG retrieval...")
-    url = os.environ.get("RAG_WORKER_URL", "https://hermes-rag.team-2b5.workers.dev")
+    url = os.environ.get("RAG_WORKER_URL", "")
     token = os.environ.get("RAG_AUTH_TOKEN") or _get_rag_token()
-    if token:
+    if token and url:
         r5 = evaluate_rag(url, token)
         report["steps"]["evaluate_rag"] = r5
         if r5["status"] == "ok":
             print(f"  MRR: {r5['mrr']:.2f}, Hit Rate: {r5['hit_rate']:.2f} (Total Evals: {r5['total']})")
     else:
-        report["steps"]["evaluate_rag"] = {"status": "skipped", "reason": "No auth token found"}
+        report["steps"]["evaluate_rag"] = {"status": "skipped", "reason": "No auth token or URL found"}
+
+    # 6. Memory decay
+    print("[6/6] Applying memory decay...")
+    queue_path = Path.home() / ".hermes" / "memora_queue_default.db"
+    if queue_path.exists():
+        try:
+            decay_stats = apply_decay_to_queue_db(queue_path, half_life_days=90, archive_threshold=0.15)
+            report["steps"]["memory_decay"] = {"status": "ok", **decay_stats}
+            print(f"  Scored: {decay_stats['scored']}, Decayed: {decay_stats['decayed']}, Archived: {decay_stats['archived']}")
+        except Exception as e:
+            report["steps"]["memory_decay"] = {"status": "failed", "error": str(e)}
+            traceback.print_exc()
+    else:
+        report["steps"]["memory_decay"] = {"status": "skipped", "reason": "No queue DB found"}
 
     # Write report
     report["finished"] = datetime.now(timezone.utc).isoformat()

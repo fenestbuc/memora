@@ -27,8 +27,9 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Memora Daemon", version="0.2.0")
 
-# Lazy-initialized search callable
+# Lazy-initialized search callable and provider instance
 _search_fn: Callable[[str], str] | None = None
+_provider_instance: Any = None
 
 
 def _get_search_fn() -> Callable[[str], str]:
@@ -37,7 +38,7 @@ def _get_search_fn() -> Callable[[str], str]:
     Tries to use an initialized MemoraProvider if environment variables
     are present, otherwise returns a stub.
     """
-    global _search_fn
+    global _search_fn, _provider_instance
     if _search_fn is not None:
         return _search_fn
 
@@ -50,6 +51,7 @@ def _get_search_fn() -> Callable[[str], str]:
                 session_id="daemon",
                 hermes_home=os.path.expanduser("~/.hermes"),
             )
+            _provider_instance = provider
             _search_fn = provider.prefetch
             logger.info("MemoraProvider initialized for daemon search")
             return _search_fn
@@ -71,7 +73,11 @@ async def health() -> Dict[str, str]:
 
 @app.post("/discord/webhook")
 async def discord_webhook(request: Request) -> JSONResponse:
-    """Receive a Discord webhook payload, parse it, and proxy through RAG."""
+    """Receive a Discord webhook payload, parse it, and proxy through RAG.
+
+    Thread continuity: messages in the same Discord channel share a
+    session_id (24h TTL) so conversational context persists.
+    """
     body_bytes = await request.body()
     try:
         payload = parse_discord_payload(body_bytes)
@@ -79,12 +85,42 @@ async def discord_webhook(request: Request) -> JSONResponse:
         logger.warning("Failed to parse Discord payload: %s", exc)
         return JSONResponse({"error": "Invalid payload"}, status_code=400)
 
+    channel_id = payload.get("channel_id", "")
+
+    # Thread continuity: get or create session for this channel
+    from memora.discord_sessions import get_or_create_session
+    session_id = get_or_create_session(channel_id)
+
+    # Temporarily set provider session context for RAG search
+    global _provider_instance
+    if _provider_instance is not None:
+        old_session = getattr(_provider_instance, "_session_id", None)
+        _provider_instance._session_id = session_id
+
     search_fn = _get_search_fn()
-    response_text = proxy_query(payload, search_fn)
+
+    try:
+        response_text = proxy_query(payload, search_fn)
+    finally:
+        if _provider_instance is not None and old_session is not None:
+            _provider_instance._session_id = old_session
+
+    # Persist this turn for future continuity
+    if _provider_instance is not None:
+        try:
+            _provider_instance.sync_turn(
+                user_content=payload.get("content", ""),
+                assistant_content=response_text,
+                session_id=session_id,
+            )
+        except Exception as exc:
+            logger.debug("Could not persist Discord turn: %s", exc)
+
     return JSONResponse({
         "response": response_text,
         "author": payload.get("author", "unknown"),
-        "channel_id": payload.get("channel_id", ""),
+        "channel_id": channel_id,
+        "session_id": session_id,
     })
 
 

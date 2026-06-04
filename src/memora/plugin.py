@@ -444,26 +444,37 @@ class MemoraProvider(MemoryProvider):
             content_str = args["content"]
             category = args.get("category", "memory")
             parent_id = args.get("parent_id")
-            
-            # Chunking logic for large texts (e.g. > 4000 chars)
+
+            # Importance scoring (non-blocking, best-effort)
+            from .importance import compute_importance
+            try:
+                importance = compute_importance(content_str, category)
+            except Exception:
+                importance = 0.5
+
+            # Semantic chunking for large texts
+            from .chunker import chunk_semantic
             max_chunk = 4000
             if len(content_str) > max_chunk:
-                chunks = [content_str[i:i+max_chunk] for i in range(0, len(content_str), max_chunk)]
+                chunks = chunk_semantic(content_str, max_chars=3600, overlap_chars=200)
                 results = []
+                first_chunk_id = None
                 for i, chunk in enumerate(chunks):
-                    # For chunks after the first, we use the provided parent_id, or we could link them.
-                    # Simple approach: just add them all with the same parent_id and category.
+                    # Link subsequent chunks to the first chunk as parent
+                    chunk_parent = parent_id if i == 0 else (first_chunk_id or parent_id)
                     try:
                         res = self._request("/memory/add", {
                             "content": f"[Part {i+1}/{len(chunks)}] {chunk}",
                             "category": category,
-                            "parent_id": parent_id,
+                            "parent_id": chunk_parent,
                             "owner_id": self._owner_id,
-                            "tenant_id": "kubar",
+                            "scope": "personal",
+                            "importance_score": importance,
                         })
                         results.append(res)
+                        if i == 0:
+                            first_chunk_id = res.get("id")
                     except Exception as e:
-                        # Fallback to queue if network fails
                         self._queue_add(category, f"[Part {i+1}/{len(chunks)}] {chunk}")
                         results.append({"status": "queued_offline", "error": str(e)})
                 self._maybe_trigger_swarm(content_str, category)
@@ -477,7 +488,8 @@ class MemoraProvider(MemoryProvider):
                     "category": category,
                     "parent_id": parent_id,
                     "owner_id": self._owner_id,
-                    "tenant_id": "kubar",
+                    "scope": "personal",
+                    "importance_score": importance,
                     **({"id": args["id"]} if "id" in args else {})
                 })
                 self._maybe_trigger_swarm(content_str, category)

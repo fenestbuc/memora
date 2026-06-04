@@ -741,8 +741,9 @@ class TestHandleToolCall(unittest.TestCase):
         payload = self._extract_payload(mock_urlopen)
         self.assertIn("owner_id", payload)
         self.assertEqual(payload["owner_id"], "test_user")
-        self.assertIn("tenant_id", payload)
-        self.assertEqual(payload["tenant_id"], "kubar")
+        self.assertIn("scope", payload)
+        self.assertEqual(payload["scope"], "personal")
+        self.assertIn("importance_score", payload)
 
     @patch("memora.plugin.urllib.request.urlopen")
     def test_add_chunked_payload_includes_owner_and_tenant(self, mock_urlopen):
@@ -758,8 +759,9 @@ class TestHandleToolCall(unittest.TestCase):
             payload = json.loads(req.data.decode("utf-8"))
             self.assertIn("owner_id", payload)
             self.assertEqual(payload["owner_id"], "test_user")
-            self.assertIn("tenant_id", payload)
-            self.assertEqual(payload["tenant_id"], "kubar")
+            self.assertIn("scope", payload)
+            self.assertEqual(payload["scope"], "personal")
+            self.assertIn("importance_score", payload)
 
 
 if __name__ == "__main__":
