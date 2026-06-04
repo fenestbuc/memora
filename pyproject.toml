@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "memora"
-version = "0.4.0"
+version = "0.5.1"
 description = "Persistent semantic memory plugin for Hermes AI agents — Digital Twins for startup teams"
 readme = "README.md"
 license = {text = "MIT"}

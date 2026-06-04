@@ -23,10 +23,11 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from memora.discord_proxy import parse_discord_payload, proxy_query
+from memora._version import __version__
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Memora Daemon", version="0.2.0")
+app = FastAPI(title="Memora Daemon", version=__version__)
 
 # Lazy-initialized search callable and provider instance
 _search_fn: Callable[[str], str] | None = None

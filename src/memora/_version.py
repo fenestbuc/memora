@@ -10,4 +10,4 @@ except ImportError:  # pragma: no cover
 try:
     __version__ = _get_version("memora")
 except Exception:  # pragma: no cover — fallback during editable installs
-    __version__ = "0.4.0"
+    __version__ = "0.5.1"
