@@ -479,6 +479,10 @@ class TestBackgroundFlush(unittest.TestCase):
 
     def setUp(self):
         self.tmpdir = tempfile.mkdtemp()
+        # Pre-create profile so onboarding is skipped during initialize()
+        Path(self.tmpdir, "memora.json").write_text(
+            '{"first_name":"test"}', encoding="utf-8"
+        )
 
     def tearDown(self):
         import shutil
@@ -550,6 +554,7 @@ class TestMetrics(unittest.TestCase):
         """_flush_queue should increment facts_flushed."""
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps({"success": True}).encode()
+        mock_resp.__enter__.return_value = mock_resp
         mock_urlopen.return_value = mock_resp
 
         self.provider._base_url = "https://test.example.com"
@@ -618,6 +623,143 @@ class TestPrefetchThreshold(unittest.TestCase):
         result = self.provider.prefetch("test query")
         self.assertIn("[business]", result)
         self.assertIn("[2026-05-01]", result)
+
+
+class TestOwnerIdFromProfile(unittest.TestCase):
+    """owner_id should be read from ~/.hermes/memora.json during initialize()."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    @patch("memora.plugin.urllib.request.urlopen")
+    def test_initialize_reads_first_name_as_owner_id(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"status": "ok"}).encode()
+        mock_urlopen.return_value = mock_resp
+
+        Path(self.tmpdir, "memora.json").write_text(
+            '{"first_name":"alice"}', encoding="utf-8"
+        )
+
+        provider = MemoraProvider()
+        with patch.dict(os.environ, {"RAG_WORKER_URL": "https://test.example.com", "RAG_AUTH_TOKEN": "real_token"}, clear=False):
+            provider.initialize("test_session", hermes_home=self.tmpdir)
+
+        self.assertEqual(provider._owner_id, "alice")
+        provider.shutdown()
+
+
+class TestHandleToolCall(unittest.TestCase):
+    """memora_add and memora_search payloads should include owner_id and tenant_id."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        self.provider = MemoraProvider()
+        self.provider._hermes_home = self.tmpdir
+        self.provider._agent_identity = "test"
+        self.provider._session_id = "test_session"
+        self.provider._queue_path = Path(self.tmpdir) / "test_queue.db"
+        self.provider._memory_dir = Path(self.tmpdir) / "memory"
+        self.provider._init_queue()
+        self.provider._l1_cache.clear()
+        self.provider._lock = threading.Lock()
+        self.provider._seen_hashes = set()
+        self.provider._circuit_open = False
+        self.provider._consecutive_failures = 0
+        self.provider._circuit_open_until = 0.0
+        self.provider._base_url = "https://test.example.com"
+        self.provider._token = "test_token"
+        self.provider._owner_id = "test_user"
+        self.provider._metrics = {
+            "facts_queued": 0,
+            "facts_flushed": 0,
+            "facts_failed": 0,
+            "search_calls": 0,
+            "prefetch_calls": 0,
+            "circuit_opens": 0,
+        }
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _extract_payload(self, mock_urlopen):
+        req = mock_urlopen.call_args[0][0]
+        return json.loads(req.data.decode("utf-8"))
+
+    @patch("memora.plugin.urllib.request.urlopen")
+    def test_search_payload_includes_owner_and_tenant(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"results": []}).encode()
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        self.provider.handle_tool_call("memora_search", {"query": "test"})
+        payload = self._extract_payload(mock_urlopen)
+        self.assertIn("owner_id", payload)
+        self.assertEqual(payload["owner_id"], "test_user")
+        self.assertIn("tenant_id", payload)
+        self.assertEqual(payload["tenant_id"], "kubar")
+
+    @patch("memora.plugin.urllib.request.urlopen")
+    def test_search_personal_scope_includes_metadata_filter(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"results": []}).encode()
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        self.provider.handle_tool_call("memora_search", {"query": "test", "scope": "personal"})
+        payload = self._extract_payload(mock_urlopen)
+        self.assertIn("metadata_filter", payload)
+        self.assertEqual(payload["metadata_filter"]["owner_id"], "test_user")
+
+    @patch("memora.plugin.urllib.request.urlopen")
+    def test_search_global_scope_excludes_owner_metadata_filter(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"results": []}).encode()
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        self.provider.handle_tool_call("memora_search", {"query": "test", "scope": "global"})
+        payload = self._extract_payload(mock_urlopen)
+        self.assertNotIn("metadata_filter", payload)
+        self.assertEqual(payload["owner_id"], "test_user")
+        self.assertEqual(payload["tenant_id"], "kubar")
+
+    @patch("memora.plugin.urllib.request.urlopen")
+    def test_add_payload_includes_owner_and_tenant(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"status": "ok"}).encode()
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        self.provider.handle_tool_call("memora_add", {"content": "Test fact"})
+        payload = self._extract_payload(mock_urlopen)
+        self.assertIn("owner_id", payload)
+        self.assertEqual(payload["owner_id"], "test_user")
+        self.assertIn("tenant_id", payload)
+        self.assertEqual(payload["tenant_id"], "kubar")
+
+    @patch("memora.plugin.urllib.request.urlopen")
+    def test_add_chunked_payload_includes_owner_and_tenant(self, mock_urlopen):
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps({"status": "ok"}).encode()
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        long_content = "A" * 5000
+        self.provider.handle_tool_call("memora_add", {"content": long_content})
+        for call in mock_urlopen.call_args_list:
+            req = call[0][0]
+            payload = json.loads(req.data.decode("utf-8"))
+            self.assertIn("owner_id", payload)
+            self.assertEqual(payload["owner_id"], "test_user")
+            self.assertIn("tenant_id", payload)
+            self.assertEqual(payload["tenant_id"], "kubar")
 
 
 if __name__ == "__main__":

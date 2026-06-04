@@ -30,6 +30,7 @@ dev = ["pytest>=8.0", "black", "ruff"]
 [project.scripts]
 memora-nightly = "memora.nightly_brain:main"
 memora-weekly = "memora.weekly_digest:main"
+memora-evals = "memora.run_evals:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

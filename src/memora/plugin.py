@@ -10,6 +10,7 @@ import hashlib
 import json
 import logging
 from .cache import SqliteL1Cache
+from . import swarm_manager, triage, evaluations as _evaluations
 import hashlib
 import os
 import re
@@ -81,7 +82,8 @@ _TOOL_SCHEMAS = [
                 "query": {"type": "string", "description": "The search query."},
                 "top_k": {"type": "integer", "description": "Max results (default: 10)."},
                 "use_reranking": {"type": "boolean", "description": "Use BGE cross-encoder for hybrid search (default: true)."},
-                "parent_id": {"type": "string", "description": "Filter by Graph Metadata parent_id."}
+                "parent_id": {"type": "string", "description": "Filter by Graph Metadata parent_id."},
+                "scope": {"type": "string", "description": "Search scope: 'personal' (default) or 'global'."}
             },
             "required": ["query"],
         },
@@ -149,6 +151,45 @@ _TOOL_SCHEMAS = [
 class MemoraProvider(MemoryProvider):
     """RAG-backed memory provider for Hermes."""
 
+    def __init__(self):
+        self._base_url = ""
+        self._token = ""
+        self._circuit_open = False
+        self._consecutive_failures = 0
+        self._circuit_open_until = 0.0
+        self._metrics = {
+            "facts_queued": 0,
+            "facts_flushed": 0,
+            "facts_failed": 0,
+            "search_calls": 0,
+            "prefetch_calls": 0,
+            "circuit_opens": 0,
+        }
+        self._lock = threading.Lock()
+        self._seen_hashes: set[str] = set()
+        self._flush_thread: threading.Thread | None = None
+        self._flush_stop_event = threading.Event()
+        self._l1_cache = SqliteL1Cache()
+        self._memory_dir: Path | None = None
+        self._auto_swarm = False
+        self._owner_id = "anonymous"
+
+    @property
+    def worker_url(self) -> str:
+        return self._base_url
+
+    @worker_url.setter
+    def worker_url(self, value: str) -> None:
+        self._base_url = value
+
+    @property
+    def worker_token(self) -> str:
+        return self._token
+
+    @worker_token.setter
+    def worker_token(self, value: str) -> None:
+        self._token = value
+
     @property
     def name(self) -> str:
         return "memora"
@@ -171,6 +212,17 @@ class MemoraProvider(MemoryProvider):
         self._config = kwargs.get("config", {})
         Path(self._hermes_home).mkdir(parents=True, exist_ok=True)
 
+        # Onboarding: prompt for profile if memora.json is missing
+        self._check_onboarding()
+
+        # Read owner_id from profile
+        profile_path = Path(self._hermes_home) / "memora.json"
+        try:
+            profile = json.loads(profile_path.read_text())
+            self._owner_id = profile.get("first_name", "anonymous")
+        except Exception:
+            self._owner_id = "anonymous"
+
         # Local memory directory (mirrors RAG writes to markdown files)
         self._memory_dir = Path(self._config.get("memory_dir", str(Path.home() / "hermes-workspace" / "memory")))
         self._memory_dir.mkdir(parents=True, exist_ok=True)
@@ -181,6 +233,9 @@ class MemoraProvider(MemoryProvider):
         # Auto-commit flag gates git commits after session end
         self._auto_commit = self._config.get("auto_commit", True)
         self._modified_files: set[Path] = set()
+
+        # Auto-swarm flag gates kanban delegate task spawning on new facts
+        self._auto_swarm = self._config.get("auto_swarm", False)
 
         # Prefetch relevance threshold (P2: configurable)
         self._prefetch_threshold = self._config.get("prefetch_threshold", 0.5)
@@ -230,8 +285,18 @@ class MemoraProvider(MemoryProvider):
         except Exception as e:
             logger.warning("RAG worker health check failed: %s", e)
 
+    def _check_onboarding(self) -> None:
+        """Run interactive onboarding if the local memora profile is missing."""
+        from . import onboarding as _onboarding
+
+        if _onboarding.load_profile(hermes_home=self._hermes_home) is None:
+            _onboarding.run_onboarding(hermes_home=self._hermes_home)
+
     def _init_queue(self) -> None:
         conn = sqlite3.connect(self._queue_path)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
         conn.execute(
             """CREATE TABLE IF NOT EXISTS queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -262,12 +327,34 @@ class MemoraProvider(MemoryProvider):
                 created_at TEXT
             )"""
         )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS facts (
+                id TEXT PRIMARY KEY,
+                content TEXT NOT NULL,
+                category TEXT,
+                superseded_by TEXT,
+                scope TEXT DEFAULT 'personal',
+                created_at TEXT
+            )"""
+        )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS pending_actions (
+                id TEXT PRIMARY KEY,
+                action_type TEXT,
+                payload JSON,
+                created_at TEXT,
+                status TEXT DEFAULT 'pending'
+            )"""
+        )
         conn.commit()
         conn.close()
 
     def _load_seen_hashes(self) -> None:
         """Load previously queued content hashes from SQLite for cross-session dedup."""
         conn = sqlite3.connect(self._queue_path)
+        conn.execute("PRAGMA journal_mode=WAL;")
+        conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("PRAGMA busy_timeout=5000;")
         cursor = conn.execute("SELECT hash FROM seen_hashes")
         for row in cursor:
             self._seen_hashes.add(row[0])
@@ -362,42 +449,63 @@ class MemoraProvider(MemoryProvider):
                         res = self._request("/memory/add", {
                             "content": f"[Part {i+1}/{len(chunks)}] {chunk}",
                             "category": category,
-                            "parent_id": parent_id
+                            "parent_id": parent_id,
+                            "owner_id": self._owner_id,
+                            "tenant_id": "kubar",
                         })
                         results.append(res)
                     except Exception as e:
                         # Fallback to queue if network fails
                         self._queue_add(category, f"[Part {i+1}/{len(chunks)}] {chunk}")
                         results.append({"status": "queued_offline", "error": str(e)})
+                self._maybe_trigger_swarm(content_str, category)
                 self._l1_cache.clear()
                 return json.dumps({"status": "success", "chunks_processed": len(chunks), "results": results})
-            
+
             # Normal size handling with offline fallback
             try:
                 res = self._request("/memory/add", {
                     "content": content_str,
                     "category": category,
                     "parent_id": parent_id,
+                    "owner_id": self._owner_id,
+                    "tenant_id": "kubar",
                     **({"id": args["id"]} if "id" in args else {})
                 })
+                self._maybe_trigger_swarm(content_str, category)
                 self._l1_cache.clear()
                 return json.dumps(res)
             except Exception as e:
                 self._queue_add(category, content_str)
+                self._maybe_trigger_swarm(content_str, category)
                 self._l1_cache.clear()
                 return json.dumps({"status": "queued_offline", "error": str(e), "message": "Network unavailable. Fact queued for background sync."})
+
+        # Intercept kanban_reassign for routing-feedback learning
+        if tool_name == "kanban_reassign":
+            from .feedback_interceptor import capture_routing_correction
+
+            feedback_jsonl = Path(self._hermes_home) / "routing_corrections.jsonl"
+            correction = capture_routing_correction(args, jsonl_path=str(feedback_jsonl))
+            self._queue_add("feedback", json.dumps(correction))
+            return json.dumps({"status": "feedback_captured", "correction": correction})
 
         action_map = {
             "memora_search": lambda: ("/search", {
                 "query": args["query"], 
                 "top_k": args.get("top_k", 10),
+                "owner_id": self._owner_id,
+                "tenant_id": "kubar",
                 **({"use_reranking": args["use_reranking"]} if "use_reranking" in args else {}),
-                **({"parent_id": args["parent_id"]} if "parent_id" in args else {})
+                **({"parent_id": args["parent_id"]} if "parent_id" in args else {}),
+                **({"metadata_filter": {"owner_id": self._owner_id}} if args.get("scope", "personal") == "personal" else {}),
             }),
             "memora_list": lambda: ("/memory/list", {k: v for k, v in args.items() if v is not None}),
             "memora_add": lambda: ("/memory/add", {
                 "content": args["content"],
                 "category": args.get("category", "memory"),
+                "owner_id": self._owner_id,
+                "tenant_id": "kubar",
                 **({"parent_id": args["parent_id"]} if "parent_id" in args else {}),
                 **({"id": args["id"]} if "id" in args else {}),
             }),
@@ -447,6 +555,13 @@ class MemoraProvider(MemoryProvider):
         """Return current metrics counters."""
         return dict(self._metrics)
 
+    def _maybe_trigger_swarm(self, content: str, category: str) -> None:
+        """Gate swarm dispatch behind the LLM triage check."""
+        if not self._auto_swarm:
+            return
+        if triage.should_trigger_swarm(content):
+            swarm_manager.trigger(source="rag", content=content, category=category)
+
     def _start_background_flush(self, interval_sec: float = 60.0) -> None:
         """Start a background thread that flushes the queue periodically."""
         if self._flush_thread is not None and self._flush_thread.is_alive():
@@ -478,6 +593,9 @@ class MemoraProvider(MemoryProvider):
         """Run VACUUM on the SQLite queue to reclaim deleted space."""
         try:
             conn = sqlite3.connect(self._queue_path)
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA busy_timeout=5000;")
             conn.execute("VACUUM")
             conn.close()
             logger.debug("Vacuumed queue: %s", self._queue_path)
@@ -547,6 +665,13 @@ class MemoraProvider(MemoryProvider):
                 "required": False,
                 "default": 0.5,
             },
+            {
+                "key": "auto_swarm",
+                "description": "Auto-spawn kanban delegate tasks when new facts are ingested",
+                "secret": False,
+                "required": False,
+                "default": False,
+            },
         ]
 
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:
@@ -557,6 +682,123 @@ class MemoraProvider(MemoryProvider):
         # Mirror built-in memory writes to RAG
         category = "user" if target == "user" else "memory"
         self._queue_add(category, content)
+
+    def add_eval_golden(self, content: str, fact_ids: List[str]) -> Dict[str, Any]:
+        """Add an eval golden dataset entry.
+
+        Args:
+            content: The eval query content.
+            fact_ids: List of canonical fact IDs that answer the query.
+
+        Returns:
+            The parsed JSON response from the RAG worker.
+        """
+        payload = {
+            "content": content,
+            "category": "eval_golden",
+            "source_session": json.dumps(fact_ids),
+        }
+        return self._request("/facts", payload)
+
+    def evaluate(self) -> Dict[str, Any]:
+        """Run evaluation against the golden dataset.
+
+        Returns:
+            The parsed JSON response containing metrics such as mrr and hit_rate.
+        """
+        return self._request("/evaluate", {}, method="POST")
+
+    def evaluate_ceo_digest(
+        self,
+        digest_text: str,
+        open_prs: List[dict],
+    ) -> Dict[str, Any]:
+        """Evaluate CEO Digest quality via LLM-as-a-Judge or heuristic fallback.
+
+        Args:
+            digest_text: The generated CEO digest string.
+            open_prs: Ground-truth list of open PR dicts from GitHub.
+
+        Returns:
+            Score dict with completeness, accuracy, conciseness, actionability,
+            and overall keys.
+        """
+        evaluator = _evaluations.CeoDigestEvaluator()
+        score = evaluator.evaluate(digest_text, open_prs)
+        return score.to_dict()
+
+    def evaluate_swarm_triggers(
+        self,
+        trigger_fn: Callable[..., dict] | None = None,
+    ) -> Dict[str, Any]:
+        """Evaluate kanban swarm trigger accuracy against a ground-truth dataset.
+
+        Args:
+            trigger_fn: Optional callable matching ``swarm_manager.trigger``.
+                If omitted, the evaluator inspects ``swarm_manager`` directly.
+
+        Returns:
+            Dict with ``accuracy`` (float), ``total_cases`` (int),
+            ``correct_cases`` (int), and ``case_details`` (list).
+        """
+        evaluator = _evaluations.SwarmTriggerEvaluator()
+        scores = evaluator.evaluate(trigger_fn)
+        correct = sum(1 for s in scores if s.correct)
+        return {
+            "accuracy": correct / len(scores) if scores else 0.0,
+            "total_cases": len(scores),
+            "correct_cases": correct,
+            "case_details": [s.to_dict() for s in scores],
+        }
+
+    def evaluate_rag_comprehensive(
+        self,
+        golden_dataset: List[Dict[str, Any]],
+        k: int = 10,
+    ) -> Dict[str, Any]:
+        """Run comprehensive RAG retrieval metrics against a golden dataset.
+
+        Args:
+            golden_dataset: List of {"query": str, "relevant_ids": List[str]}.
+            k: Cut-off rank for metrics (default 10).
+
+        Returns:
+            Dict of RAGMetrics fields.
+        """
+        evaluator = _evaluations.RAGEvaluator(
+            base_url=self._base_url,
+            token=self._token,
+            k=k,
+        )
+        metrics = evaluator.evaluate(golden_dataset)
+        return metrics.to_dict()
+
+    def run_eval_suite(
+        self,
+        golden_dataset: List[Dict[str, Any]] | None = None,
+        ceo_digest_text: str = "",
+        open_prs: List[dict] | None = None,
+        trigger_fn: Callable[..., dict] | None = None,
+    ) -> Dict[str, Any]:
+        """Execute the full Memora evaluation suite and return a report.
+
+        Args:
+            golden_dataset: RAG golden dataset.
+            ceo_digest_text: Optional CEO digest to judge.
+            open_prs: Ground-truth PRs for digest eval.
+            trigger_fn: Optional swarm trigger callable.
+
+        Returns:
+            Full evaluation report dict.
+        """
+        report = _evaluations.run_full_evaluation(
+            provider=self,
+            golden_dataset=golden_dataset,
+            ceo_digest_text=ceo_digest_text,
+            open_prs=open_prs,
+            trigger_fn=trigger_fn,
+        )
+        return report.to_dict()
 
     # --- Internal helpers ---
 
@@ -575,6 +817,9 @@ class MemoraProvider(MemoryProvider):
                 return
             self._seen_hashes.add(content_hash)
             conn = sqlite3.connect(self._queue_path)
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA busy_timeout=5000;")
             # Persist hash for cross-session dedup
             conn.execute(
                 "INSERT OR IGNORE INTO seen_hashes (hash, created_at) VALUES (?, ?)",
@@ -591,9 +836,21 @@ class MemoraProvider(MemoryProvider):
             self._write_local_memory(category, content)
 
     def _write_local_memory(self, category: str, content: str) -> None:
-        """DEPRECATED: No longer write to local markdown files.
-        RAG is the primary store. We only keep memory.md as a manual curated fallback."""
-        pass
+        """Mirror queued fact to a local markdown file.
+
+        Each category gets its own ``.md`` file under ``self._memory_dir``.
+        Entries are appended so the file grows monotonically.
+        """
+        if self._memory_dir is None:
+            return
+        safe_category = category.lower().replace(" ", "_")
+        file_path = self._memory_dir / f"{safe_category}.md"
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now(timezone.utc).isoformat()
+        session = getattr(self, "_session_id", "unknown")
+        entry = f"- [{timestamp}] [{session}] {content}\n"
+        with open(file_path, "a", encoding="utf-8") as f:
+            f.write(entry)
 
     def _commit_memory_files(self) -> None:
         """DEPRECATED: Markdown auto-commits are disabled."""
@@ -602,6 +859,9 @@ class MemoraProvider(MemoryProvider):
     def _flush_queue(self, chunk_size: int = 100) -> None:
         with self._lock:
             conn = sqlite3.connect(self._queue_path)
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.execute("PRAGMA busy_timeout=5000;")
             cursor = conn.execute(
                 "SELECT id, action, category, content, source_session, source_file, created_at FROM queue ORDER BY id"
             )
@@ -611,6 +871,7 @@ class MemoraProvider(MemoryProvider):
                 return
 
             ids_to_delete = []
+            facts_flushed_success = 0
 
             # Process in chunks to avoid payload size issues
             for i in range(0, len(all_rows), chunk_size):
@@ -630,6 +891,7 @@ class MemoraProvider(MemoryProvider):
                     result = self._request("/memory/import", {"facts": facts})
                     if result.get("success"):
                         ids_to_delete.extend([r[0] for r in chunk])
+                        facts_flushed_success += len(chunk)
                     else:
                         raise Exception(f"Batch import failed: {result}")
                 except Exception as batch_err:
@@ -644,6 +906,7 @@ class MemoraProvider(MemoryProvider):
                                 "source_session": source_session or self._session_id,
                             })
                             ids_to_delete.append(row_id)
+                            facts_flushed_success += 1
                         except Exception as e:
                             logger.debug("Failed to flush queue item %s: %s", row_id, e)
                             self._metrics["facts_failed"] += 1
@@ -654,10 +917,7 @@ class MemoraProvider(MemoryProvider):
                                 (action, category, content, source_session, source_file, created_at,
                                  datetime.now(timezone.utc).isoformat(), str(e))
                             )
-                            # Do NOT delete from queue on failure — keep for retry
-                            # But we must avoid infinite re-flush, so delete anyway
-                            # and rely on failed_queue for retry logic
-                            # For now: move to failed_queue and delete from queue
+                            # Move to failed_queue and delete from queue to avoid infinite retry
                             ids_to_delete.append(row_id)
 
             if ids_to_delete:
@@ -665,7 +925,7 @@ class MemoraProvider(MemoryProvider):
                 conn.execute(f"DELETE FROM queue WHERE id IN ({placeholders})", ids_to_delete)
                 conn.commit()
             conn.close()
-            self._metrics["facts_flushed"] += len(ids_to_delete)
+            self._metrics["facts_flushed"] += facts_flushed_success
 
     def _extract_facts(self, messages: List[Dict[str, Any]]) -> None:
         """Extract preference-like messages and key decisions from conversation.
