@@ -13,6 +13,14 @@ def sync_repo(repo_dir: str):
     print(f"Starting Memora Company Repo Sync into {repo_dir}...")
     repo_path = Path(repo_dir)
     facts_dir = repo_path / "facts"
+    
+    # 1. Pull latest changes from remote to prevent conflicts
+    print("Pulling latest changes from remote...")
+    try:
+        subprocess.run(["git", "pull", "--rebase", "origin", "main"], cwd=repo_dir, check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        print(f"Warning: Git pull failed. May cause push conflicts. Error: {e.stderr if hasattr(e, 'stderr') else e}")
+    
     facts_dir.mkdir(exist_ok=True, parents=True)
     
     p = MemoraProvider()
@@ -85,7 +93,7 @@ def sync_repo(repo_dir: str):
                 subprocess.run(["git", "push", "origin", "main"], cwd=repo_dir, check=True)
                 print("Successfully pushed comprehensive wiki to company memory repo.")
             except subprocess.CalledProcessError:
-                print("Could not push to remote. You may need to run `git push` manually.")
+                print("Could not push to remote. You may need to run `git push` manually or check permissions.")
         else:
             print("No new changes to commit.")
     except subprocess.CalledProcessError as e:

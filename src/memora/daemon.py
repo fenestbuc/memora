@@ -1,8 +1,11 @@
-"""Memora background daemon — HTTP wrapper for Discord/MCP listeners.
+"""Memora background daemon — HTTP wrapper for Discord/MCP listeners and autonomous Wiki syncing.
 
 Provides a lightweight FastAPI server that exposes the Discord webhook
 parsing and RAG proxy logic so it can run continuously as a systemd
 service.
+
+It also runs a background loop to autonomously synchronize the company memory
+and build the comprehensive wiki asynchronously.
 """
 
 from __future__ import annotations
@@ -27,7 +30,74 @@ from memora._version import __version__
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Memora Daemon", version=__version__)
+# --- Background Repo Sync Loop ---
+async def repo_sync_loop():
+    """Continuously synchronizes the company memory repo in the background."""
+    # Run once an hour. 
+    # Use asyncio.sleep so we don't block the async event loop.
+    import yaml
+    
+    sync_interval_seconds = 3600  # 1 hour
+    
+    # Read the custom repo path from hermes config if available
+    repo_path = os.path.expanduser("~/hermes-workspace/kubarlabs-memory")
+    hermes_config = os.path.expanduser("~/.hermes/config.yaml")
+    if os.path.exists(hermes_config):
+        try:
+            with open(hermes_config, "r") as f:
+                cfg = yaml.safe_load(f) or {}
+                if "custom" in cfg and "company_memory_dir" in cfg["custom"]:
+                    repo_path = cfg["custom"]["company_memory_dir"]
+        except Exception as e:
+            logger.warning(f"Could not read config.yaml for repo path: {e}")
+
+    logger.info(f"Background repo sync loop started. Target repo: {repo_path}")
+    
+    while True:
+        try:
+            # Sleep first to avoid a thundering herd on restart
+            await asyncio.sleep(60) 
+            
+            # Execute the sync synchronously in a thread
+            def _do_sync():
+                if os.path.exists(repo_path):
+                    try:
+                        # Late import to prevent circular dependencies if any
+                        from memora.repo_sync import sync_repo
+                        logger.info("Executing autonomous background repo sync...")
+                        sync_repo(repo_path)
+                    except Exception as e:
+                        logger.error(f"Background sync failed: {e}")
+                else:
+                    logger.warning(f"Company memory repo not found at {repo_path}. Skipping autonomous sync.")
+            
+            await asyncio.to_thread(_do_sync)
+            
+            # Sleep until next interval
+            await asyncio.sleep(sync_interval_seconds - 60)
+            
+        except asyncio.CancelledError:
+            logger.info("Repo sync loop cancelled")
+            break
+        except Exception as e:
+            logger.error(f"Unexpected error in repo sync loop: {e}")
+            await asyncio.sleep(300) # Sleep 5 minutes on error before retry
+
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Start background tasks
+    task = asyncio.create_task(repo_sync_loop())
+    yield
+    # Shutdown: Cancel tasks
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+app = FastAPI(title="Memora Daemon", version=__version__, lifespan=lifespan)
 
 # Lazy-initialized search callable and provider instance
 _search_fn: Callable[[str], str] | None = None
