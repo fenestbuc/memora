@@ -86,4 +86,4 @@ If the user asks how to set up Memora on a new agent or workspace, provide these
 
 - **Trivial Messages:** The plugin auto-filters short (< 15 chars) or trivial messages (e.g., "ok", "go ahead") from being ingested to prevent corpus pollution.
 - **Vector Index Latency:** Facts added via `memora_add` may take a few seconds to appear in `memora_search` due to embedding generation. This is normal.
-- **Worker Configuration:** The Cloudflare worker code is managed separately from the Hermes plugin. The plugin assumes a running, healthy worker. Check health using `memora_stats`.
+- **Worker Configuration:** The Cloudflare Workers RAG backend lives in `rag-worker/` inside this repo. It is deployed separately from the Hermes plugin. Check health using `memora_stats`.

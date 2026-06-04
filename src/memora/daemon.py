@@ -18,6 +18,7 @@ import threading
 import time
 from typing import Any, Callable, Dict
 
+import asyncio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
@@ -30,6 +31,7 @@ app = FastAPI(title="Memora Daemon", version="0.2.0")
 # Lazy-initialized search callable and provider instance
 _search_fn: Callable[[str], str] | None = None
 _provider_instance: Any = None
+_provider_lock = asyncio.Lock()
 
 
 def _get_search_fn() -> Callable[[str], str]:
@@ -93,19 +95,23 @@ async def discord_webhook(request: Request) -> JSONResponse:
 
     # Temporarily set provider session context for RAG search
     global _provider_instance
-    if _provider_instance is not None:
-        old_session = getattr(_provider_instance, "_session_id", None)
-        _provider_instance._session_id = session_id
+    old_session = None
+    response_text = ""
 
-    search_fn = _get_search_fn()
+    async with _provider_lock:
+        if _provider_instance is not None:
+            old_session = getattr(_provider_instance, "_session_id", None)
+            _provider_instance._session_id = session_id
 
-    try:
-        response_text = proxy_query(payload, search_fn)
-    finally:
-        if _provider_instance is not None and old_session is not None:
-            _provider_instance._session_id = old_session
+        search_fn = _get_search_fn()
 
-    # Persist this turn for future continuity
+        try:
+            response_text = proxy_query(payload, search_fn)
+        finally:
+            if _provider_instance is not None and old_session is not None:
+                _provider_instance._session_id = old_session
+
+    # Persist this turn for future continuity (outside lock to avoid holding it during I/O)
     if _provider_instance is not None:
         try:
             _provider_instance.sync_turn(

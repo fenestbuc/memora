@@ -69,18 +69,20 @@ def compute_importance(
         logger.debug("No RAG worker configured; using heuristic importance")
         return _heuristic_importance(content, category)
 
-    # Use content hash for LRU cache key
-    import hashlib
+    # Use content hash for cache key to avoid unbounded key sizes
     content_hash = hashlib.sha256(f"{category}:{content}".encode()).hexdigest()[:16]
+    return _compute_importance_cached(content_hash, content, category, url, auth)
 
-    # Check in-memory cache
-    cache_key = f"imp:{content_hash}"
-    # Note: @lru_cache won't work directly here due to unhashable args.
-    # We use a simple module-level cache dict instead.
-    cached = _IMPORTANCE_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
 
+@lru_cache(maxsize=1024)
+def _compute_importance_cached(
+    _content_hash: str,
+    content: str,
+    category: str,
+    url: str,
+    auth: str,
+) -> float:
+    """Cached inner function.  Uses SHA-256 hash as the bounded cache key."""
     prompt = _IMPORTANCE_PROMPT.format(category=category, content=content[:2000])
 
     try:
@@ -89,7 +91,7 @@ def compute_importance(
             data=json.dumps({
                 "query": prompt,
                 "system": "You are a fact importance evaluator. Respond with ONLY a number between 0.0 and 1.0.",
-                "top_k": 0,  # No RAG context needed
+                "top_k": 0,
             }).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {auth}",
@@ -102,18 +104,13 @@ def compute_importance(
             data = json.loads(resp.read().decode("utf-8"))
 
         answer = str(data.get("answer", "")).strip()
-        # Extract first float-like token
         score = _parse_score(answer)
 
     except Exception as exc:
         logger.warning("LLM importance scoring failed (%s); using heuristic", exc)
         score = _heuristic_importance(content, category)
 
-    _IMPORTANCE_CACHE[cache_key] = score
     return score
-
-
-_IMPORTANCE_CACHE: dict[str, float] = {}
 
 
 def _parse_score(answer: str) -> float:
@@ -176,4 +173,4 @@ def _heuristic_importance(content: str, category: str) -> float:
 
 def reset_cache() -> None:
     """Clear the in-memory importance scoring cache."""
-    _IMPORTANCE_CACHE.clear()
+    _compute_importance_cached.cache_clear()

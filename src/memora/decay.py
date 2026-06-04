@@ -33,6 +33,7 @@ def apply_decay(
     that fall below the threshold.
 
     Also scores any un-scored facts using the LLM heuristic before decaying.
+    Processes facts in batches until none remain.
 
     Args:
         conn: SQLite connection to the RAG queue or a local mirror DB.
@@ -46,72 +47,77 @@ def apply_decay(
     lambda_ = math.log(2) / half_life_days
     now = datetime.now(timezone.utc)
     stats = {"scored": 0, "decayed": 0, "archived": 0}
+    total_batches = 0
 
-    cursor = conn.execute(
-        """
-        SELECT id, content, category, importance_score, updated_at, archived
-        FROM facts
-        WHERE archived = 0 OR archived IS NULL
-        ORDER BY updated_at
-        LIMIT ?
-        """,
-        (batch_size,),
-    )
+    while True:
+        cursor = conn.execute(
+            """
+            SELECT id, content, category, importance_score, updated_at, archived
+            FROM facts
+            WHERE archived = 0 OR archived IS NULL
+            ORDER BY updated_at
+            LIMIT ?
+            """,
+            (batch_size,),
+        )
+        rows = cursor.fetchall()
+        if not rows:
+            break
 
-    rows = cursor.fetchall()
-    if not rows:
-        logger.info("No facts eligible for decay")
-        return stats
+        total_batches += 1
+        for row in rows:
+            fact_id, content, category, current_score, updated_at_str, _archived = row
 
-    for row in rows:
-        fact_id, content, category, current_score, updated_at_str, _archived = row
+            # Score un-scored facts
+            if current_score is None:
+                try:
+                    current_score = compute_importance(content or "", category or "memory")
+                    conn.execute(
+                        "UPDATE facts SET importance_score = ? WHERE id = ?",
+                        (current_score, fact_id),
+                    )
+                    stats["scored"] += 1
+                except Exception as exc:
+                    logger.warning("Could not score fact %s: %s", fact_id, exc)
+                    current_score = 0.5
 
-        # Score un-scored facts
-        if current_score is None:
+            # Compute age in days
             try:
-                current_score = compute_importance(content or "", category or "memory")
+                updated_at = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                updated_at = now
+
+            age_days = max(0, (now - updated_at).total_seconds() / 86400)
+            decayed_score = current_score * math.exp(-lambda_ * age_days)
+
+            # Archive if below threshold
+            if decayed_score < archive_threshold:
                 conn.execute(
-                    "UPDATE facts SET importance_score = ? WHERE id = ?",
-                    (current_score, fact_id),
+                    """
+                    UPDATE facts
+                    SET importance_score = ?, decayed_at = ?, archived = 1, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (round(decayed_score, 4), now.isoformat(), now.isoformat(), fact_id),
                 )
-                stats["scored"] += 1
-            except Exception as exc:
-                logger.warning("Could not score fact %s: %s", fact_id, exc)
-                current_score = 0.5
+                stats["archived"] += 1
+                logger.debug("Archived fact %s (score %.3f)", fact_id, decayed_score)
+            else:
+                conn.execute(
+                    "UPDATE facts SET importance_score = ?, updated_at = ? WHERE id = ?",
+                    (round(decayed_score, 4), now.isoformat(), fact_id),
+                )
+                stats["decayed"] += 1
 
-        # Compute age in days
-        try:
-            updated_at = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
-        except (ValueError, AttributeError):
-            updated_at = now
+        conn.commit()
 
-        age_days = max(0, (now - updated_at).total_seconds() / 86400)
-        decayed_score = current_score * math.exp(-lambda_ * age_days)
-
-        # Archive if below threshold
-        if decayed_score < archive_threshold:
-            conn.execute(
-                """
-                UPDATE facts
-                SET importance_score = ?, decayed_at = ?, archived = 1
-                WHERE id = ?
-                """,
-                (round(decayed_score, 4), now.isoformat(), fact_id),
-            )
-            stats["archived"] += 1
-            logger.debug("Archived fact %s (score %.3f)", fact_id, decayed_score)
-        else:
-            conn.execute(
-                "UPDATE facts SET importance_score = ? WHERE id = ?",
-                (round(decayed_score, 4), fact_id),
-            )
-            stats["decayed"] += 1
-
-    conn.commit()
-    logger.info(
-        "Decay pass complete: scored=%d, decayed=%d, archived=%d",
-        stats["scored"], stats["decayed"], stats["archived"]
-    )
+    if total_batches == 0:
+        logger.info("No facts eligible for decay")
+    else:
+        logger.info(
+            "Decay complete (%d batches): scored=%d, decayed=%d, archived=%d",
+            total_batches, stats["scored"], stats["decayed"], stats["archived"]
+        )
     return stats
 
 

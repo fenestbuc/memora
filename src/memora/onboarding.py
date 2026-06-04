@@ -13,6 +13,7 @@ declaration to the company repository via ``github_sync``.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,36 @@ from pathlib import Path
 from typing import Any
 
 from .github_sync import generate_company_pr
+
+
+def _check_prerequisites() -> list[str]:
+    """Return list of missing prerequisite warnings."""
+    warnings = []
+    try:
+        result = subprocess.run(["python3", "--version"], capture_output=True, text=True)
+        stdout = result.stdout if isinstance(getattr(result, "stdout", None), str) else ""
+        match = re.search(r"Python\s+(\d+)\.(\d+)", stdout)
+        if match:
+            major, minor = int(match.group(1)), int(match.group(2))
+            if major < 3 or (major == 3 and minor < 10):
+                warnings.append(f"Python {major}.{minor} is too old. Python 3.10+ required.")
+        else:
+            warnings.append("Could not determine Python version.")
+    except (FileNotFoundError, Exception):
+        warnings.append("python3 not found.")
+
+    try:
+        if subprocess.run(["git", "--version"], capture_output=True).returncode != 0:
+            warnings.append("git not found.")
+    except Exception:
+        warnings.append("git not found.")
+
+    return warnings
+
+
+def _validate_repo_url(url: str) -> bool:
+    """Basic validation that the URL looks like a GitHub repo."""
+    return bool(re.match(r"^https://github\.com/[^/]+/[^/]+(/.*)?$", url.strip()))
 
 
 def load_profile(hermes_home: str | None = None) -> dict[str, Any] | None:
@@ -87,7 +118,8 @@ def run_onboarding(hermes_home: str | None = None) -> dict[str, Any]:
     2. Company repository
     3. Kanban backend preference
     4. Tunnel provider preference
-    5. Pushes member declaration
+    5. RAG Worker credentials
+    6. Pushes member declaration
 
     Args:
         hermes_home: Path to the Hermes home directory. Defaults to ``~/.hermes``.
@@ -104,11 +136,20 @@ def run_onboarding(hermes_home: str | None = None) -> dict[str, Any]:
         "facts through a shared GitHub repository.\n"
     )
 
+    prereq_warnings = _check_prerequisites()
+    if prereq_warnings:
+        print("⚠️  Prerequisites missing:")
+        for w in prereq_warnings:
+            print(f"    • {w}")
+        confirm = input("Continue anyway? [y/N]: ").strip().lower()
+        if confirm != "y":
+            sys.exit(1)
+
     # ------------------------------------------------------------------
     # Step 1: Identity
     # ------------------------------------------------------------------
     print("━" * 60)
-    print("Step 1/4 — Who are you?")
+    print("Step 1/5 — Who are you?")
     print("━" * 60)
 
     first_name = ""
@@ -123,7 +164,7 @@ def run_onboarding(hermes_home: str | None = None) -> dict[str, Any]:
     # Step 2: Company repository
     # ------------------------------------------------------------------
     print("\n━" * 60)
-    print("Step 2/4 — Company repository")
+    print("Step 2/5 — Company repository")
     print("━" * 60)
     print(
         "  Memora uses a shared GitHub repository as the 'source of truth'\n"
@@ -131,21 +172,30 @@ def run_onboarding(hermes_home: str | None = None) -> dict[str, Any]:
         "  the CEO or decision-maker should create it first.\n"
     )
 
-    repo_url = input("  Company GitHub repo URL: ").strip()
-    if not repo_url:
-        print(
-            "\n  A company GitHub repository is required for Memora multiplayer mode.\n"
-            "  The repository must be created and configured by the CEO or key\n"
-            "  decision-maker before team members can onboard.\n\n"
-            "  Please ask them to set up the repo and provide the link."
-        )
-        sys.exit(1)
+    repo_url = ""
+    while not repo_url:
+        repo_url = input("  Company GitHub repo URL: ").strip()
+        if not repo_url:
+            print(
+                "\n  A company GitHub repository is required for Memora multiplayer mode.\n"
+                "  The repository must be created and configured by the CEO or key\n"
+                "  decision-maker before team members can onboard.\n\n"
+                "  Please ask them to set up the repo and provide the link."
+            )
+            sys.exit(1)
+        if not _validate_repo_url(repo_url):
+            print(f"  That doesn't look like a valid GitHub repo URL: {repo_url}")
+            print("  Expected format: https://github.com/<org>/<repo>")
+            retry = input("  Try again? [y/N]: ").strip().lower()
+            if retry != "y":
+                sys.exit(1)
+            repo_url = ""
 
     # ------------------------------------------------------------------
     # Step 3: Kanban backend
     # ------------------------------------------------------------------
     print("\n━" * 60)
-    print("Step 3/4 — Kanban backend")
+    print("Step 3/5 — Kanban backend")
     print("━" * 60)
     print(
         "  When Memora detects actionable facts, it can create Kanban tasks\n"
@@ -166,7 +216,7 @@ def run_onboarding(hermes_home: str | None = None) -> dict[str, Any]:
     # Step 4: Tunnel provider
     # ------------------------------------------------------------------
     print("\n━" * 60)
-    print("Step 4/4 — Webhook tunnel")
+    print("Step 4/5 — Webhook tunnel")
     print("━" * 60)
     print(
         "  Memora can receive webhooks from Discord, Notion, and Linear\n"
@@ -185,6 +235,45 @@ def run_onboarding(hermes_home: str | None = None) -> dict[str, Any]:
     )
 
     # ------------------------------------------------------------------
+    # Prepare dirs early so Step 5 can write env file
+    # ------------------------------------------------------------------
+    home = Path(hermes_home) if hermes_home else Path.home() / ".hermes"
+    home.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Step 5: RAG Worker credentials
+    # ------------------------------------------------------------------
+    print("\n━" * 60)
+    print("Step 5/5 — RAG Worker credentials")
+    print("━" * 60)
+    print(
+        "  Memora needs a Cloudflare Workers RAG backend to store and search\n"
+        "  memories. If your team already has one deployed, ask the admin for\n"
+        "  the URL and auth token. If not, you can deploy it later.\n"
+    )
+
+    rag_url = input("  RAG Worker URL (optional, press Enter to skip): ").strip()
+    rag_token = ""
+    if rag_url:
+        rag_token = input("  RAG Auth Token (optional): ").strip()
+
+    if rag_url and rag_token:
+        env_file = home / "memora_env.sh"
+        env_lines = [f"# Memora environment — auto-generated by onboarding"]
+        if kanban_backend != "hermes":
+            env_lines.append(f'export MEMORA_KANBAN_BACKEND="{kanban_backend}"')
+        if tunnel_provider and tunnel_provider != "none":
+            env_lines.append(f'export MEMORA_TUNNEL="{tunnel_provider}"')
+        env_lines.append(f'export RAG_WORKER_URL="{rag_url}"')
+        env_lines.append(f'export RAG_AUTH_TOKEN="{rag_token}"')
+        env_file.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
+        print(f"\n  Credentials saved to: {env_file}")
+    elif rag_url and not rag_token:
+        print("\n  ⚠️  URL provided but no token. Set RAG_AUTH_TOKEN later.")
+    else:
+        print("\n  ⚠️  No RAG credentials provided. You can add them later in ~/.hermes/memora_env.sh")
+
+    # ------------------------------------------------------------------
     # Build & save profile
     # ------------------------------------------------------------------
     profile: dict[str, Any] = {
@@ -195,9 +284,6 @@ def run_onboarding(hermes_home: str | None = None) -> dict[str, Any]:
         "tunnel_provider": tunnel_provider,
         "version": "1.0.0",
     }
-
-    home = Path(hermes_home) if hermes_home else Path.home() / ".hermes"
-    home.mkdir(parents=True, exist_ok=True)
     memora_json = home / "memora.json"
     memora_json.write_text(json.dumps(profile, indent=2), encoding="utf-8")
 
@@ -211,17 +297,10 @@ def run_onboarding(hermes_home: str | None = None) -> dict[str, Any]:
     print(f"  Kanban: {kanban_backend}")
     print(f"  Tunnel: {tunnel_provider}")
 
-    # Write environment helper
     env_file = home / "memora_env.sh"
-    env_lines = [f"# Memora environment — auto-generated by onboarding"]
-    if kanban_backend != "hermes":
-        env_lines.append(f'export MEMORA_KANBAN_BACKEND="{kanban_backend}"')
-    if tunnel_provider and tunnel_provider != "none":
-        env_lines.append(f'export MEMORA_TUNNEL="{tunnel_provider}"')
-    env_file.write_text("\n".join(env_lines) + "\n", encoding="utf-8")
-    print(f"\n  Environment helper written to:")
-    print(f"  → {env_file}")
-    print(f"  Source it with: source {env_file}")
+    if env_file.exists():
+        print(f"\n  Environment helper exists: {env_file}")
+        print(f"  Source it with: source {env_file}")
 
     # ------------------------------------------------------------------
     # Push member declaration
@@ -264,6 +343,21 @@ def run_onboarding(hermes_home: str | None = None) -> dict[str, Any]:
     if tunnel_provider == "localtunnel":
         print(
             "\n  1. Install localtunnel: npm install -g localtunnel"
+        )
+
+    if not rag_url or not rag_token:
+        print(
+            "\n  RAG credentials missing. Add them to ~/.hermes/memora_env.sh:"
+            "\n    export RAG_WORKER_URL='<your-worker-url>'"
+            "\n    export RAG_AUTH_TOKEN='<your-token>'"
+        )
+    if not rag_url:
+        print(
+            "\n  If you are the operator deploying the worker:"
+            "\n    cd rag-worker"
+            "\n    cp wrangler.toml.template wrangler.toml"
+            "\n    wrangler secret put AUTH_TOKEN"
+            "\n    wrangler deploy"
         )
 
     print(

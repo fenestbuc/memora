@@ -15,13 +15,19 @@ import pytest
 from memora.onboarding import load_profile, run_onboarding
 
 
+@pytest.fixture(autouse=True)
+def _mock_prerequisites(monkeypatch):
+    """Suppress prerequisite checks so tests don't need extra inputs."""
+    monkeypatch.setattr("memora.onboarding._check_prerequisites", lambda: [])
+
+
 class TestOnboarding:
     """TDD for interactive onboarding prompt, local save, and GitHub push."""
 
     def test_onboarding_prompts_and_saves_json(self, tmp_path: Path) -> None:
         """Onboarding should prompt for inputs and save memora.json with defaults."""
-        # Name, Role, Repo, Kanban choice (number), Tunnel choice (number)
-        inputs = iter(["Alice", "CEO", "https://github.com/acme/corp", "1", "1"])
+        # Name, Role, Repo, Kanban choice (number), Tunnel choice (number), RAG URL (empty=skip)
+        inputs = iter(["Alice", "CEO", "https://github.com/acme/corp", "1", "1", ""])
 
         with patch("builtins.input", side_effect=inputs):
             with patch("memora.onboarding.subprocess.run"):
@@ -41,7 +47,7 @@ class TestOnboarding:
 
     def test_onboarding_selects_linear_and_ngrok(self, tmp_path: Path) -> None:
         """User should be able to select Linear and ngrok via number input."""
-        inputs = iter(["Bob", "Engineering", "https://github.com/acme/corp", "2", "2"])
+        inputs = iter(["Bob", "Engineering", "https://github.com/acme/corp", "2", "2", ""])
 
         with patch("builtins.input", side_effect=inputs):
             with patch("memora.onboarding.subprocess.run"):
@@ -53,7 +59,7 @@ class TestOnboarding:
 
     def test_onboarding_creates_member_file_and_pushes(self, tmp_path: Path) -> None:
         """Onboarding should push a members/{role}-{name}.json declaration."""
-        inputs = iter(["Bob", "Engineering", "https://github.com/acme/corp", "hermes", "cloudflared"])
+        inputs = iter(["Bob", "Engineering", "https://github.com/acme/corp", "hermes", "cloudflared", ""])
 
         with patch("builtins.input", side_effect=inputs):
             with patch("memora.onboarding.subprocess.run"):
@@ -76,7 +82,7 @@ class TestOnboarding:
 
     def test_onboarding_rejects_empty_repo_url(self, tmp_path: Path) -> None:
         """Empty repo URL should print instructions and exit."""
-        inputs = iter(["Alice", "CEO", ""])
+        inputs = iter(["Alice", "CEO", "", ""])
 
         with patch("builtins.input", side_effect=inputs):
             with pytest.raises(SystemExit) as exc_info:
@@ -88,7 +94,7 @@ class TestOnboarding:
         self, tmp_path: Path
     ) -> None:
         """Empty first_name or role should re-prompt until filled."""
-        inputs = iter(["", "Alice", "", "CEO", "https://github.com/acme/corp", "1", "1"])
+        inputs = iter(["", "Alice", "", "CEO", "https://github.com/acme/corp", "1", "1", ""])
 
         with patch("builtins.input", side_effect=inputs):
             with patch("memora.onboarding.subprocess.run"):
@@ -100,7 +106,7 @@ class TestOnboarding:
 
     def test_onboarding_cleans_up_json_on_git_failure(self, tmp_path: Path) -> None:
         """Subprocess errors should remove memora.json and exit with an auth hint."""
-        inputs = iter(["Alice", "CEO", "https://github.com/acme/corp", "1", "1"])
+        inputs = iter(["Alice", "CEO", "https://github.com/acme/corp", "1", "1", ""])
         memora_json = tmp_path / "memora.json"
 
         with patch("builtins.input", side_effect=inputs):
@@ -118,7 +124,7 @@ class TestOnboarding:
         self, tmp_path: Path
     ) -> None:
         """If git clone actually fails during _push_member_declaration, clean up."""
-        inputs = iter(["Alice", "CEO", "https://github.com/acme/corp", "1", "1"])
+        inputs = iter(["Alice", "CEO", "https://github.com/acme/corp", "1", "1", ""])
 
         def fake_subprocess(cmd, **kwargs):
             if cmd[0] == "git" and cmd[1] == "clone":
@@ -136,8 +142,8 @@ class TestOnboarding:
         assert not (tmp_path / "memora.json").exists()
 
     def test_onboarding_writes_env_helper(self, tmp_path: Path) -> None:
-        """When non-default choices are made, an env helper file should be written."""
-        inputs = iter(["Alice", "CEO", "https://github.com/acme/corp", "2", "2"])
+        """When non-default choices and RAG credentials are provided, env helper should be written."""
+        inputs = iter(["Alice", "CEO", "https://github.com/acme/corp", "2", "2", "https://worker.example.com", "secret_token"])
 
         with patch("builtins.input", side_effect=inputs):
             with patch("memora.onboarding.subprocess.run"):
@@ -149,6 +155,8 @@ class TestOnboarding:
         text = env_file.read_text()
         assert 'MEMORA_KANBAN_BACKEND="linear"' in text
         assert 'MEMORA_TUNNEL="ngrok"' in text
+        assert 'RAG_WORKER_URL="https://worker.example.com"' in text
+        assert 'RAG_AUTH_TOKEN="secret_token"' in text
 
 
 class TestLoadProfile:

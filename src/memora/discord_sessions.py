@@ -66,6 +66,9 @@ def get_or_create_session(
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
     conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    conn.execute("PRAGMA busy_timeout=5000;")
     _init_db(conn)
 
     now = datetime.now(timezone.utc)
@@ -125,6 +128,8 @@ def cleanup_expired_sessions(
         return 0
 
     conn = sqlite3.connect(str(db_path))
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA busy_timeout=5000;")
     _init_db(conn)
 
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=ttl_hours)).isoformat()

@@ -692,7 +692,7 @@ class TestHandleToolCall(unittest.TestCase):
         return json.loads(req.data.decode("utf-8"))
 
     @patch("memora.plugin.urllib.request.urlopen")
-    def test_search_payload_includes_owner_and_tenant(self, mock_urlopen):
+    def test_search_payload_includes_owner(self, mock_urlopen):
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps({"results": []}).encode()
         mock_resp.__enter__.return_value = mock_resp
@@ -702,11 +702,10 @@ class TestHandleToolCall(unittest.TestCase):
         payload = self._extract_payload(mock_urlopen)
         self.assertIn("owner_id", payload)
         self.assertEqual(payload["owner_id"], "test_user")
-        self.assertIn("tenant_id", payload)
-        self.assertEqual(payload["tenant_id"], "kubar")
+        self.assertNotIn("tenant_id", payload)
 
     @patch("memora.plugin.urllib.request.urlopen")
-    def test_search_personal_scope_includes_metadata_filter(self, mock_urlopen):
+    def test_search_personal_scope_passed_directly(self, mock_urlopen):
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps({"results": []}).encode()
         mock_resp.__enter__.return_value = mock_resp
@@ -714,11 +713,10 @@ class TestHandleToolCall(unittest.TestCase):
 
         self.provider.handle_tool_call("memora_search", {"query": "test", "scope": "personal"})
         payload = self._extract_payload(mock_urlopen)
-        self.assertIn("metadata_filter", payload)
-        self.assertEqual(payload["metadata_filter"]["owner_id"], "test_user")
+        self.assertEqual(payload["scope"], "personal")
 
     @patch("memora.plugin.urllib.request.urlopen")
-    def test_search_global_scope_excludes_owner_metadata_filter(self, mock_urlopen):
+    def test_search_global_scope_excludes_owner_filter(self, mock_urlopen):
         mock_resp = MagicMock()
         mock_resp.read.return_value = json.dumps({"results": []}).encode()
         mock_resp.__enter__.return_value = mock_resp
@@ -728,7 +726,7 @@ class TestHandleToolCall(unittest.TestCase):
         payload = self._extract_payload(mock_urlopen)
         self.assertNotIn("metadata_filter", payload)
         self.assertEqual(payload["owner_id"], "test_user")
-        self.assertEqual(payload["tenant_id"], "kubar")
+        self.assertNotIn("tenant_id", payload)
 
     @patch("memora.plugin.urllib.request.urlopen")
     def test_add_payload_includes_owner_and_tenant(self, mock_urlopen):

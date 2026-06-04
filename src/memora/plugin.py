@@ -165,12 +165,15 @@ class MemoraProvider(MemoryProvider):
         }
         self._lock = threading.Lock()
         self._seen_hashes: set[str] = set()
+        self._seen_hashes_order: list[str] = []
+        self._max_seen_hashes = 10000
         self._flush_thread: threading.Thread | None = None
         self._flush_stop_event = threading.Event()
         self._l1_cache = SqliteL1Cache()
         self._memory_dir: Path | None = None
         self._auto_swarm = False
         self._owner_id = "anonymous"
+        self._auto_commit = False
 
     @property
     def worker_url(self) -> str:
@@ -512,20 +515,18 @@ class MemoraProvider(MemoryProvider):
 
         action_map = {
             "memora_search": lambda: ("/search", {
-                "query": args["query"], 
+                "query": args["query"],
                 "top_k": args.get("top_k", 10),
                 "owner_id": self._owner_id,
-                "tenant_id": "kubar",
                 **({"use_reranking": args["use_reranking"]} if "use_reranking" in args else {}),
                 **({"parent_id": args["parent_id"]} if "parent_id" in args else {}),
-                **({"metadata_filter": {"owner_id": self._owner_id}} if args.get("scope", "personal") == "personal" else {}),
+                **({"scope": args["scope"]} if "scope" in args else {}),
             }),
             "memora_list": lambda: ("/memory/list", {k: v for k, v in args.items() if v is not None}),
             "memora_add": lambda: ("/memory/add", {
                 "content": args["content"],
                 "category": args.get("category", "memory"),
                 "owner_id": self._owner_id,
-                "tenant_id": "kubar",
                 **({"parent_id": args["parent_id"]} if "parent_id" in args else {}),
                 **({"id": args["id"]} if "id" in args else {}),
             }),
@@ -839,6 +840,11 @@ class MemoraProvider(MemoryProvider):
             if content_hash in self._seen_hashes:
                 return
             self._seen_hashes.add(content_hash)
+            self._seen_hashes_order.append(content_hash)
+            # Evict oldest hashes if over budget
+            while len(self._seen_hashes_order) > self._max_seen_hashes:
+                old_hash = self._seen_hashes_order.pop(0)
+                self._seen_hashes.discard(old_hash)
             conn = getattr(self, "_queue_conn", None)
             close_after = False
             if conn is None:

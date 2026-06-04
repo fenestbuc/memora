@@ -27,8 +27,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-MIGRATIONS_DIR = Path.home() / "hermes-workspace" / "hermes-rag" / "migrations"
-WRANGLER_TOML = Path.home() / "hermes-workspace" / "hermes-rag" / "wrangler.toml"
+# Resolve rag-worker relative to this file (inside the memora package)
+_MEMORA_SRC = Path(__file__).resolve().parent.parent.parent
+MIGRATIONS_DIR = _MEMORA_SRC / "rag-worker" / "migrations"
+WRANGLER_TOML = _MEMORA_SRC / "rag-worker" / "wrangler.toml"
 
 
 def _read_wrangler_config() -> dict[str, Any]:
@@ -170,7 +172,7 @@ def cmd_apply(args: argparse.Namespace) -> int:
                 [
                     "wrangler", "d1", "execute", database_name,
                     "--command",
-                    f"INSERT INTO _migrations (version, name, checksum) VALUES ({seq}, '{name}', '{checksum}')",
+                    f"INSERT INTO _migrations (version, name, checksum) VALUES ({seq}, '{name.replace(\"'\", \"''\")}', '{checksum}')",
                 ],
                 check=True,
                 cwd=WRANGLER_TOML.parent,
