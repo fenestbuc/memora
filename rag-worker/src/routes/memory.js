@@ -219,7 +219,7 @@ export async function handleMemoryList(body, env) {
     if (search) { sql += " AND content LIKE ?"; params.push(`%${search}%`); }
     if (owner_id) { sql += " AND owner_id = ?"; params.push(sanitizeOwnerId(owner_id)); }
     if (scope) { sql += " AND scope = ?"; params.push(sanitizeScope(scope)); }
-    if (archived !== undefined) { sql += " AND archived = ?"; params.push(archived ? 1 : 0); }
+    if (archived !== undefined) { sql += " AND archived = ?"; params.push(archived === true || archived === 1 ? 1 : 0); }
     else { sql += " AND (archived = 0 OR archived IS NULL)"; }
 
     sql += " ORDER BY updated_at DESC LIMIT ? OFFSET ?";
@@ -331,8 +331,8 @@ export async function handleMemoryStats(env) {
 
 export async function handleMemoryExport(env, url) {
   try {
-    const limit = Math.min(parseInt(url.searchParams.get("limit") || "1000"), MAX_EXPORT_LIMIT);
-    const offset = parseInt(url.searchParams.get("offset") || "0");
+    const limit = Math.min(Math.max(0, parseInt(url.searchParams.get("limit") || "1000") || 0), MAX_EXPORT_LIMIT);
+    const offset = Math.max(0, parseInt(url.searchParams.get("offset") || "0") || 0);
 
     const result = await env.DB.prepare(
       "SELECT * FROM facts ORDER BY category, id LIMIT ? OFFSET ?"

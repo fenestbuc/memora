@@ -136,6 +136,13 @@ def _split_normal(text: str, max_chars: int) -> Generator[str, None, None]:
         sentences = _split_sentences(part)
         chunk = ""
         for sentence in sentences:
+            if len(sentence) > max_chars:
+                # A single sentence is too long — hard-split at word boundaries
+                if chunk:
+                    yield chunk
+                    chunk = ""
+                yield from _hard_split(sentence, max_chars)
+                continue
             if len(chunk) + len(sentence) > max_chars and chunk:
                 yield chunk
                 chunk = sentence
@@ -143,6 +150,21 @@ def _split_normal(text: str, max_chars: int) -> Generator[str, None, None]:
                 chunk += sentence
         if chunk:
             yield chunk
+
+
+def _hard_split(text: str, max_chars: int) -> Generator[str, None, None]:
+    """Split *text* into chunks of at most *max_chars* at word boundaries."""
+    start = 0
+    while start < len(text):
+        end = min(start + max_chars, len(text))
+        # Try to back up to a word boundary
+        if end < len(text):
+            while end > start and text[end] not in " \t\n":
+                end -= 1
+            if end == start:  # no word boundary found; force split
+                end = start + max_chars
+        yield text[start:end]
+        start = end
 
 
 def _split_sentences(text: str) -> List[str]:

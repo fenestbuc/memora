@@ -22,8 +22,9 @@ export async function handleSearch(body, env) {
       return json({ error: "Empty embedding vector", code: "EMPTY_VECTOR" }, 400);
     }
 
+    const numericTopK = Number.isFinite(top_k) ? Math.max(1, Math.floor(top_k)) : 10;
     const searchOpts = {
-      topK: shouldRerank ? Math.min(top_k * 3, 50) : top_k,
+      topK: shouldRerank ? Math.min(numericTopK * 3, 50) : numericTopK,
       returnMetadata: "all"
     };
 
