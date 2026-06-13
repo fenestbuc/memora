@@ -13,11 +13,11 @@ from typing import Generator, List
 # Sentence terminators that should trigger a split.
 # The negative lookahead avoids splitting "Mr. Smith" or "e.g. hello".
 _SENTENCE_RE = re.compile(
-    r"(?<=[.!?])\s+(?=[A-Z])"  # period/question/exclamation + space + capital
+    r"(?<=[.!?])(\s+)(?=[A-Z])"  # period/question/exclamation + space + capital
 )
 
 # Markdown headers are always split points.
-_HEADER_RE = re.compile(r"\n#{1,6}\s+")
+_HEADER_RE = re.compile(r"(\n#{1,6}\s+)")
 
 # Code block boundaries.
 _CODE_FENCE_RE = re.compile(r"^```[a-zA-Z0-9]*$")
@@ -122,9 +122,23 @@ def _split_normal(text: str, max_chars: int) -> Generator[str, None, None]:
         yield text
         return
 
-    # Split at headers first
+    # Split at headers first, preserving the header due to capture group
     parts = _HEADER_RE.split(text)
+    
+    # Re-combine the header delimiters with their subsequent text blocks
+    combined_parts = []
+    current_part = ""
     for part in parts:
+        if _HEADER_RE.match(part):
+            current_part = part
+        else:
+            combined_parts.append(current_part + part)
+            current_part = ""
+            
+    if current_part:
+        combined_parts.append(current_part)
+
+    for part in combined_parts:
         part = part.strip()
         if not part:
             continue
@@ -169,22 +183,30 @@ def _hard_split(text: str, max_chars: int) -> Generator[str, None, None]:
 
 def _split_sentences(text: str) -> List[str]:
     """Split text into sentences using regex heuristics."""
-    # Use the regex split, then re-merge fragments that were falsely split
+    # Use the regex split with capture group to keep the delimiter spaces
     raw = _SENTENCE_RE.split(text)
     if len(raw) <= 1:
         return [text]
 
-    result: List[str] = [raw[0]]
-    for fragment in raw[1:]:
+    # Recombine parts with their trailing whitespace matches
+    merged_raw = []
+    # parts will be [sentence, space, sentence, space, sentence]
+    for i in range(0, len(raw) - 1, 2):
+        merged_raw.append(raw[i] + raw[i+1])
+    if len(raw) % 2 != 0:
+        merged_raw.append(raw[-1])
+
+    result: List[str] = [merged_raw[0]]
+    for fragment in merged_raw[1:]:
         # Check if the split was at a false sentence boundary
         last_chunk = result[-1]
-        boundary_pos = len(last_chunk) - 1
+        boundary_pos = len(last_chunk.rstrip()) - 1
         while boundary_pos >= 0 and last_chunk[boundary_pos] != ".":
             boundary_pos -= 1
 
         if boundary_pos >= 0 and not _is_sentence_end(last_chunk, boundary_pos):
-            # Merge back
-            result[-1] = last_chunk + " " + fragment
+            # Merge back (whitespace already preserved by capture group)
+            result[-1] = last_chunk + fragment
         else:
             result.append(fragment)
 
