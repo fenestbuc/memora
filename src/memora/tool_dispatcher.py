@@ -63,6 +63,15 @@ def dispatch(
         return "/memory/delete", {"ids": args.get("ids", [])}
     if tool_name == "memora_stats":
         return "/memory/stats", None
+    if tool_name == "memora_think":
+        body = {
+            "query": args["query"],
+            "top_k": args.get("top_k", 10),
+            "owner_id": owner_id,
+        }
+        if "scope" in args:
+            body["scope"] = args["scope"]
+        return "/think", body
     raise NotImplementedError(f"Provider does not handle tool {tool_name}")
 
 

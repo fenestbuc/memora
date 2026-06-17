@@ -57,8 +57,8 @@ class TestOnboarding:
         assert profile["kanban_backend"] == "linear"
         assert profile["tunnel_provider"] == "ngrok"
 
-    def test_onboarding_creates_member_file_and_pushes(self, tmp_path: Path) -> None:
-        """Onboarding should push a members/{role}-{name}.json declaration."""
+    def test_onboarding_creates_member_workspace_and_pushes(self, tmp_path: Path) -> None:
+        """Onboarding should push a members/{role}-{name}/ workspace."""
         inputs = iter(["Bob", "Engineering", "https://github.com/acme/corp", "hermes", "cloudflared", ""])
 
         with patch("builtins.input", side_effect=inputs):
@@ -69,16 +69,24 @@ class TestOnboarding:
         assert mock_pr.call_count == 1
         call_kwargs = mock_pr.call_args.kwargs
 
-        assert call_kwargs["filename"] == "members/engineering-bob.json"
+        files = call_kwargs["files"]
+        assert any("members/engineering-bob/USER.md" in p for p in files)
+        assert any("members/engineering-bob.json" in p for p in files)
         assert call_kwargs["title"] == "Add member: Engineering - Bob"
 
-        # Verify the content is valid JSON with the profile data
-        content = call_kwargs["content"]
-        parsed = json.loads(content)
+        # Verify the JSON metadata is valid and contains the profile data
+        json_path = next(p for p in files if p.endswith(".json"))
+        parsed = json.loads(files[json_path])
         assert parsed["first_name"] == "Bob"
         assert parsed["role"] == "Engineering"
         assert parsed["company_github_repo"] == "https://github.com/acme/corp"
         assert parsed["kanban_backend"] == "hermes"
+
+        # Verify the workspace subfolders are scaffolded
+        assert any("members/engineering-bob/concepts/README.md" in p for p in files)
+        assert any("members/engineering-bob/customers/README.md" in p for p in files)
+        assert any("members/engineering-bob/meetings/README.md" in p for p in files)
+        assert any("members/engineering-bob/sources/README.md" in p for p in files)
 
     def test_onboarding_rejects_empty_repo_url(self, tmp_path: Path) -> None:
         """Empty repo URL should print instructions and exit."""

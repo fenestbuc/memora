@@ -19,6 +19,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict
 
 import asyncio
@@ -83,17 +84,120 @@ async def repo_sync_loop():
             logger.error(f"Unexpected error in repo sync loop: {e}")
             await asyncio.sleep(300) # Sleep 5 minutes on error before retry
 
+async def memory_sync_loop():
+    """Periodically flush any facts that were queued with pending_vector_sync."""
+    from .http_client import HttpClient, HttpConfig
+
+    base_url = os.environ.get("RAG_WORKER_URL", "").rstrip("/")
+    token = os.environ.get("RAG_AUTH_TOKEN", "")
+    interval_seconds = 900  # 15 minutes
+
+    if not base_url or not token:
+        logger.warning("RAG_WORKER_URL or RAG_AUTH_TOKEN not set; memory sync loop is disabled")
+        while True:
+            await asyncio.sleep(interval_seconds)
+
+    client = HttpClient(HttpConfig(base_url=base_url, token=token))
+    logger.info("Background memory sync loop started")
+
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            result = await asyncio.to_thread(client.post, "/memory/sync", {})
+            synced = result.get("synced", 0)
+            if synced:
+                logger.info("Deferred memory sync flushed %d facts", synced)
+        except asyncio.CancelledError:
+            logger.info("Memory sync loop cancelled")
+            break
+        except Exception as e:
+            logger.error("Memory sync loop error: %s", e)
+            await asyncio.sleep(300)
+
+
+async def per_person_cron_loop():
+    """Run scheduled per-member crons from the company repo."""
+    from .company_rules import resolve_company_memory_dir
+    from .cron_scanner import due_jobs, run_cron_job
+    from .http_client import HttpClient, HttpConfig
+
+    base_url = os.environ.get("RAG_WORKER_URL", "").rstrip("/")
+    token = os.environ.get("RAG_AUTH_TOKEN", "")
+    interval_seconds = 60
+
+    if not base_url or not token:
+        logger.warning("RAG worker not configured; per-person cron loop is disabled")
+        while True:
+            await asyncio.sleep(interval_seconds)
+
+    client = HttpClient(HttpConfig(base_url=base_url, token=token))
+    company_dir = resolve_company_memory_dir(None)
+    logger.info("Per-person cron loop started")
+
+    last_ran: set[str] = set()
+
+    while True:
+        try:
+            await asyncio.sleep(interval_seconds)
+            jobs = due_jobs(company_dir)
+            for job in jobs:
+                key = f"{job.path}:{job.schedule}:{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
+                if key in last_ran:
+                    continue
+                last_ran.add(key)
+                # cap history to avoid memory growth
+                if len(last_ran) > 1000:
+                    last_ran = set(list(last_ran)[-500:])
+
+                logger.info("Running cron job: %s", job.path)
+
+                def _run():
+                    result = run_cron_job(job, lambda p: client.post("/think", p))
+                    answer = result.get("answer", "")
+                    if answer:
+                        client.post("/memory/add", {
+                            "content": f"Cron '{job.path.name}' result\n\n{answer}",
+                            "category": "automations",
+                            "owner_id": job.owner,
+                            "scope": "company",
+                        })
+                    return result
+
+                try:
+                    await asyncio.to_thread(_run)
+                except Exception as e:
+                    logger.error("Cron job %s failed: %s", job.path, e)
+        except asyncio.CancelledError:
+            logger.info("Per-person cron loop cancelled")
+            break
+        except Exception as e:
+            logger.error("Per-person cron loop error: %s", e)
+            await asyncio.sleep(300)
+
+
 from contextlib import asynccontextmanager
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Start background tasks
-    task = asyncio.create_task(repo_sync_loop())
+    repo_task = asyncio.create_task(repo_sync_loop())
+    sync_task = asyncio.create_task(memory_sync_loop())
+    cron_task = asyncio.create_task(per_person_cron_loop())
     yield
     # Shutdown: Cancel tasks
-    task.cancel()
+    repo_task.cancel()
+    sync_task.cancel()
+    cron_task.cancel()
     try:
-        await task
+        await repo_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await sync_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await cron_task
     except asyncio.CancelledError:
         pass
 

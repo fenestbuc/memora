@@ -239,8 +239,9 @@ sys.path.insert(0, os.path.expanduser("~/.hermes/plugins/memora/src"))
 
 try:
     from memora.github_sync import generate_company_pr
+    from memora.member_workspace import build_member_files
 except Exception as exc:
-    print(f"Warning: could not import memora.github_sync: {exc}")
+    print(f"Warning: could not import memora helpers: {exc}")
     print("Skipping member declaration push.")
     sys.exit(0)
 
@@ -250,7 +251,7 @@ profile = {
     "company_github_repo": os.environ["MEMORA_REPO"],
 }
 
-filename = f"members/{profile['role'].lower()}-{profile['first_name'].lower()}.json"
+files = build_member_files(profile)
 
 try:
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -262,11 +263,10 @@ try:
         )
         generate_company_pr(
             title=f"Add member: {profile['role']} - {profile['first_name']}",
-            filename=filename,
-            content=json.dumps(profile, indent=2),
+            files=files,
             repo_path=repo_path,
         )
-    print(f"Member declaration pushed: {filename}")
+    print(f"Member workspace pushed: {', '.join(files.keys())}")
 except subprocess.CalledProcessError as exc:
     print("\nGitHub sync failed.")
     print(

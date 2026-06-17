@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from .github_sync import generate_company_pr
+from .member_workspace import build_member_files
 
 
 def _check_prerequisites() -> list[str]:
@@ -370,7 +371,7 @@ def run_onboarding(hermes_home: str | None = None) -> dict[str, Any]:
 
 
 def _push_member_declaration(profile: dict[str, Any]) -> None:
-    """Clone the company repo and push a member declaration PR.
+    """Clone the company repo and push a member workspace PR.
 
     Args:
         profile: The onboarding profile containing ``company_github_repo``,
@@ -380,6 +381,8 @@ def _push_member_declaration(profile: dict[str, Any]) -> None:
     first_name = profile["first_name"]
     role = profile["role"]
 
+    files = build_member_files(profile)
+
     with tempfile.TemporaryDirectory() as tmpdir:
         repo_path = Path(tmpdir) / "repo"
         subprocess.run(
@@ -388,14 +391,10 @@ def _push_member_declaration(profile: dict[str, Any]) -> None:
             capture_output=True,
         )
 
-        filename = f"members/{role.lower()}-{first_name.lower()}.json"
-        content = json.dumps(profile, indent=2)
-
         generate_company_pr(
             title=f"Add member: {role} - {first_name}",
-            filename=filename,
-            content=content,
+            files=files,
             repo_path=repo_path,
         )
 
-        print(f"  Member declaration pushed: {filename}")
+        print(f"  Member workspace pushed: {list(files.keys())}")
