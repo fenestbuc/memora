@@ -32,6 +32,8 @@ Memora provides the following tools:
 
 - **memora_search**: Semantic search across all indexed memories. Returns ranked results by relevance. Use for conceptual queries.
   - Parameters: `query` (string), `top_k` (integer, default 10)
+- **memora_think**: Synthesize an answer across retrieved memories with citations and gap analysis. Use this when the user asks a question that requires connecting multiple facts.
+  - Parameters: `query` (string), `top_k` (integer, default 10), `scope` (string, optional)
 - **memora_list**: List facts with SQL filters. Good for browsing or finding facts by exact category.
   - Parameters: `category` (string), `search` (string), `limit` (integer), `offset` (integer)
 - **memora_stats**: Get a breakdown of facts by category and total count.
@@ -39,6 +41,10 @@ Memora provides the following tools:
   - Parameters: `content` (string), `category` (string, default "memory"), `id` (string, optional)
 - **memora_update**: Update an existing fact by ID.
 - **memora_delete**: Delete facts by ID.
+
+## Shared company rule files
+
+If the company memory repo contains files at the root such as `_brain-filing-rules.md` or `_output-rules.md`, they are automatically loaded into your system prompt. Follow them when filing facts or formatting answers.
 
 ## Core Workflows
 
@@ -58,6 +64,7 @@ Run these via the terminal tool when requested by the user or scheduled via cron
 
 - **`memora-nightly`**: Nightly brain indexer. Scans workspace files (mtime hashing), extracts entities for the wiki, and detects contradictory facts. Run via `cd ~/hermes-workspace && memora-nightly`.
 - **`memora-weekly`**: Generates a weekly digest of memory activity. Run via `cd ~/hermes-workspace && memora-weekly`.
+- **`memora-doctor`**: Health check. Reports worker reachability, pending vector sync, local queue depth, and company repo sync lag. Run via `cd ~/hermes-workspace && memora-doctor`.
 
 ## Installing Memora for Other Agents
 

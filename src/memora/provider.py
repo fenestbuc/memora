@@ -71,6 +71,7 @@ except ImportError:
             pass
 
 from .cache import SqliteL1Cache
+from .company_rules import load_company_rules, resolve_company_memory_dir
 from . import evaluations as _evaluations
 from . import swarm_manager, triage
 from .fact_extractor import extract_facts
@@ -157,6 +158,19 @@ _TOOL_SCHEMAS = [
         "description": "Get memory stats (total facts, by category).",
         "parameters": {"type": "object", "properties": {}, "required": []},
     },
+    {
+        "name": "memora_think",
+        "description": "Synthesize an answer across retrieved company memory. Returns a cited answer and a list of gaps. Use this when the user asks a question that requires pulling multiple facts together, instead of raw memora_search.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The question to answer."},
+                "top_k": {"type": "integer", "description": "Number of facts to retrieve (default: 10)."},
+                "scope": {"type": "string", "description": "Search scope: 'personal' or 'company'. Default respects the user's context."},
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 # Trivial messages — do not persist as memory
@@ -177,6 +191,7 @@ class MemoraProvider(MemoryProvider):
         self._queue: FactQueue | None = None
         self._l1_cache = SqliteL1Cache()
         self._memory_dir: Path | None = None
+        self._company_memory_dir: Path | None = None
         self._session_id = ""
         self._owner_id = "anonymous"
         self._auto_ingest = True
@@ -228,6 +243,7 @@ class MemoraProvider(MemoryProvider):
         self._auto_commit = config.get("auto_commit", False)
         self._memory_dir = Path(config.get("memory_dir", str(Path.home() / "hermes-workspace" / "memory")))
         self._memory_dir.mkdir(parents=True, exist_ok=True)
+        self._company_memory_dir = resolve_company_memory_dir(config)
 
         base_url = os.environ.get("RAG_WORKER_URL", _DEFAULT_URL).rstrip("/")
         token = os.environ.get("RAG_AUTH_TOKEN", _DEFAULT_TOKEN)
@@ -251,12 +267,16 @@ class MemoraProvider(MemoryProvider):
         logger.info("MemoraProvider shutdown. Metrics: %s", self._metrics)
 
     def system_prompt_block(self) -> str:
-        return (
+        base = (
             "You have access to a persistent long-term memory via the memora_* tools. "
             "Use memora_search to recall past context before answering. "
             "After learning something important, DO NOT use the default memory tool — ALWAYS use memora_add to persist it directly to the RAG backend. "
             "When using memora_add, you MUST explicitly categorize the fact using precise tags (e.g., projects, strategy, business, integrations, user) rather than dumping it into the default 'memory' bucket."
         )
+        rules = load_company_rules(self._company_memory_dir)
+        if not rules:
+            return base
+        return f"{base}\n\n{rules}"
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         self._metrics["prefetch_calls"] += 1

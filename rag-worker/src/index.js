@@ -3,6 +3,7 @@ import { handleIngest } from "./routes/ingest.js";
 import { handleSearch } from "./routes/search.js";
 import { handleRerank } from "./routes/rerank.js";
 import { handleChat } from "./routes/chat.js";
+import { handleThink } from "./routes/think.js";
 import { handleDelete } from "./routes/delete.js";
 import {
   handleMemoryAdd,
@@ -70,6 +71,8 @@ export default {
             return await handleRerank(body, env);
           case "/chat":
             return await handleChat(body, env);
+          case "/think":
+            return await handleThink(body, env);
           case "/delete":
             return await handleDelete(body, env);
           case "/memory/import":
@@ -112,7 +115,7 @@ export default {
         error: "Not found",
         code: "ROUTE_NOT_FOUND",
         routes: [
-          "POST /embed", "POST /ingest", "POST /search", "POST /rerank", "POST /chat", "POST /delete",
+          "POST /embed", "POST /ingest", "POST /search", "POST /rerank", "POST /chat", "POST /think", "POST /delete",
           "POST /memory/import", "POST /memory/add", "POST /memory/update", "POST /memory/delete", "POST /memory/list",
           "POST /memory/sync",
           "GET /health", "GET /memory/stats", "GET /memory/export"

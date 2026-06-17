@@ -17,9 +17,19 @@ Your instance syncs business-critical facts through a central GitHub repository 
 - **You learn from humans:** When your user corrects a routing decision via `kanban_reassign`, that feedback is captured as training data in `routing_corrections.jsonl`.
 - **You protect privacy:** Personal notes (`scope=personal`) use `owner_id` metadata filtering and never bleed into other teammates' queries.
 
+## 2. Company brain concepts
+
+Memora is a single-user personal brain extended for teams. The shared layer uses:
+
+1. **Per-person workspace folders:** Onboarding pushes `members/<Role>-<Name>/USER.md` plus subfolders for `concepts/`, `customers/`, `meetings/`, and `sources/`.
+2. **Shared rule files:** `_brain-filing-rules.md` and `_output-rules.md` at the company repo root are read into every agent's system prompt.
+3. **Synthesized answers:** `memora_think` retrieves facts and returns a cited answer with a gap section.
+4. **Health checks:** `memora-doctor` surfaces worker, queue, and repo-sync issues.
+5. **Per-person crons:** Markdown files under `crons/<Role>-<Name>/` with frontmatter schedules run automatically through the daemon.
+
 ---
 
-## 2. Onboarding (First Run)
+## 3. Onboarding (First Run)
 
 If you are asked to install or set up Memora for a user, execute the installer:
 
@@ -38,13 +48,14 @@ The `install.sh` and `onboarding.py` scripts enforce three fields:
 
 ### Post-Install State
 Once onboarding completes:
-- A `members/<Role>-<Name>.json` file is pushed to the repo to declare the user's twin.
+- A `members/<Role>-<Name>/` workspace is pushed to the repo, containing `USER.md`, `concepts/`, `customers/`, `meetings/`, and `sources/`.
 - `memora-daemon.service` starts in the background (Linux with systemd).
 - A public URL for webhook integrations is saved to `~/.hermes/memora_tunnel.txt`.
+- Shared rule files at the company repo root (`_brain-filing-rules.md`, `_output-rules.md`) are loaded into the agent's system prompt.
 
 ---
 
-## 3. The CEO Digest
+## 4. The CEO Digest
 
 If your user's role is **CEO**, the nightly cron generates a daily summary of pending PRs requiring human approval.
 
@@ -54,11 +65,13 @@ If your user's role is **CEO**, the nightly cron generates a daily summary of pe
 
 ---
 
-## 4. Agent Operational Rules
+## 5. Agent Operational Rules
 
 When operating as a Twin with the Memora toolset enabled, follow these directives:
 
 1. **Let the Daemon Work:** Webhooks happen asynchronously via the daemon. Do not run blocking polling scripts in your main terminal.
 2. **Do Not Manually Edit JSONL:** Rely on the `feedback_interceptor` to write to `routing_corrections.jsonl`.
-3. **Respect Scope:** When querying `memora_search`, omit the `scope` argument to search the user's personal context. Set `scope="global"` only when explicitly searching for company-wide strategic facts.
-4. **Kanban is Gated:** `triage.py` creates single tickets, not orchestrated agent swarms. Focus on answering the user rather than micro-managing background tasks.
+3. **Respect Scope:** When querying `memora_search`, omit the `scope` argument to search the user's personal context. Set `scope="company"` only when explicitly searching for shared company facts.
+4. **Prefer memora_think for synthesis:** When the user asks a question that connects multiple facts, call `memora_think` for a cited answer with gap analysis instead of returning raw search results.
+5. **Kanban is Gated:** `triage.py` creates single tickets, not orchestrated agent swarms. Focus on answering the user rather than micro-managing background tasks.
+6. **Run memora-doctor if drift is suspected:** Use it to identify pending vector syncs, local queue backlogs, or stale company repo syncs.
