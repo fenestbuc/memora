@@ -38,7 +38,7 @@ Memora provides the following tools:
   - Parameters: `category` (string), `search` (string), `limit` (integer), `offset` (integer)
 - **memora_stats**: Get a breakdown of facts by category and total count.
 - **memora_add**: Persist a new fact to long-term memory.
-  - Parameters: `content` (string), `category` (string, default "memory"), `id` (string, optional)
+  - Parameters: `content` (string), `category` (string, default "memory"), `scope` (string, "personal" or "company"), `id` (string, optional)
 - **memora_update**: Update an existing fact by ID.
 - **memora_delete**: Delete facts by ID.
 

@@ -14,3 +14,12 @@ def test_dispatch_memora_think() -> None:
 def test_dispatch_memora_think_respects_scope() -> None:
     path, body = dispatch("memora_think", {"query": "Q", "scope": "company"}, owner_id="bob")
     assert body["scope"] == "company"
+
+
+def test_dispatch_memora_add_passes_scope() -> None:
+    path, body = dispatch(
+        "memora_add",
+        {"content": "shared", "category": "business", "scope": "company"},
+        owner_id="alice",
+    )
+    assert body["scope"] == "company"

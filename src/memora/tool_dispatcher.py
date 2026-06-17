@@ -35,6 +35,8 @@ def build_add_payload(args: dict[str, Any], owner_id: str) -> Tuple[str, dict[st
         body["parent_id"] = args["parent_id"]
     if "id" in args:
         body["id"] = args["id"]
+    if "scope" in args:
+        body["scope"] = args["scope"]
     return "/memory/add", body
 
 

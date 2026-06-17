@@ -96,7 +96,7 @@ _TOOL_SCHEMAS = [
                 "top_k": {"type": "integer", "description": "Max results (default: 10)."},
                 "use_reranking": {"type": "boolean", "description": "Use BGE cross-encoder for hybrid search (default: true)."},
                 "parent_id": {"type": "string", "description": "Filter by Graph Metadata parent_id."},
-                "scope": {"type": "string", "description": "Search scope: 'personal' (default) or 'global'."},
+                "scope": {"type": "string", "description": "Search scope: 'personal' (default) or 'company'."},
             },
             "required": ["query"],
         },
@@ -125,6 +125,7 @@ _TOOL_SCHEMAS = [
                 "category": {"type": "string", "description": "Category tag (e.g., projects, strategy, business, integrations, user). MUST be specific, avoid the default 'memory' bucket."},
                 "parent_id": {"type": "string", "description": "Optional Graph Metadata parent_id for bidirectional linking."},
                 "id": {"type": "string"},
+                "scope": {"type": "string", "description": "Scope: 'personal' (default) or 'company'. Use 'company' for shared team facts."},
             },
             "required": ["content"],
         },
@@ -271,7 +272,8 @@ class MemoraProvider(MemoryProvider):
             "You have access to a persistent long-term memory via the memora_* tools. "
             "Use memora_search to recall past context before answering. "
             "After learning something important, DO NOT use the default memory tool — ALWAYS use memora_add to persist it directly to the RAG backend. "
-            "When using memora_add, you MUST explicitly categorize the fact using precise tags (e.g., projects, strategy, business, integrations, user) rather than dumping it into the default 'memory' bucket."
+            "When using memora_add, you MUST explicitly categorize the fact using precise tags (e.g., projects, strategy, business, integrations, user) rather than dumping it into the default 'memory' bucket. "
+            "Set scope='company' when the fact should be shared with the team; omit scope for personal notes."
         )
         rules = load_company_rules(self._company_memory_dir)
         if not rules:

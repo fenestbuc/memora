@@ -138,12 +138,12 @@ Before they run their first query, seed their folder with 5–10 pages that are 
 Memora currently uses two access axes:
 
 1. **`owner_id`** — the teammate's first name from `~/.hermes/memora.json`.
-2. **`scope`** — `personal` (default), `company`, or `global`.
+2. **`scope`** — `personal` (default) or `company`.
 
 ### How scoping works
 
 - `scope=personal` facts are returned only when the query matches the same `owner_id`.
-- `scope=company` or `scope=global` facts are visible to everyone.
+- `scope=company` facts are visible to everyone.
 - Folder conventions inside the company repo add a second, softer boundary. For example, sensitive HR notes can live in `members/hr-carol/private/` and be excluded from the wiki index via `_output-rules.md`.
 
 ### Two models to choose from
