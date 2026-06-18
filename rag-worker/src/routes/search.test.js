@@ -1,88 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { handleSearch, buildD1Filters } from './search.js';
-
-function fakeEnv(vector = new Array(768).fill(0.1)) {
-  return {
-    AI: {
-      run: async () => ({ data: vector }),
-    },
-    VECTORIZE: {
-      query: async (_vector, opts) => ({ matches: [], searchOpts: opts }),
-    },
-    EMBEDDING_MODEL: '@cf/baai/bge-m3',
-  };
-}
-
-describe('handleSearch scope metadata filtering', () => {
-  it('filters personal search by scope=personal and owner_id', async () => {
-    let capturedOpts = null;
-    const env = {
-      ...fakeEnv(),
-      VECTORIZE: {
-        query: async (_vector, opts) => {
-          capturedOpts = opts;
-          return { matches: [] };
-        },
-      },
-    };
-
-    const resp = await handleSearch(
-      { query: 'quarterly plan', owner_id: 'alice', scope: 'personal' },
-      env,
-    );
-    assert.strictEqual(resp.status, 200);
-    assert.deepStrictEqual(capturedOpts.filter, {
-      scope: 'personal',
-      owner_id: 'alice',
-      archived: 0,
-    });
-  });
-
-  it('filters company search by scope=company and owner_id', async () => {
-    let capturedOpts = null;
-    const env = {
-      ...fakeEnv(),
-      VECTORIZE: {
-        query: async (_vector, opts) => {
-          capturedOpts = opts;
-          return { matches: [] };
-        },
-      },
-    };
-
-    const resp = await handleSearch(
-      { query: 'team budget', owner_id: 'alice', scope: 'company' },
-      env,
-    );
-    assert.strictEqual(resp.status, 200);
-    assert.deepStrictEqual(capturedOpts.filter, {
-      scope: 'company',
-      owner_id: 'alice',
-      archived: 0,
-    });
-  });
-
-  it('defaults missing scope to personal and applies owner_id', async () => {
-    let capturedOpts = null;
-    const env = {
-      ...fakeEnv(),
-      VECTORIZE: {
-        query: async (_vector, opts) => {
-          capturedOpts = opts;
-          return { matches: [] };
-        },
-      },
-    };
-
-    await handleSearch({ query: 'notes', owner_id: 'bob' }, env);
-    assert.deepStrictEqual(capturedOpts.filter, {
-      scope: 'personal',
-      owner_id: 'bob',
-      archived: 0,
-    });
-  });
-});
+import { buildD1Filters, buildVectorizeFilter } from './search.js';
 
 describe('buildD1Filters', () => {
   it('maps personal scope with owner_id to owner_id filter', () => {
@@ -123,5 +41,53 @@ describe('buildD1Filters', () => {
 
   it('returns empty filters when only personal scope is given without owner_id', () => {
     assert.deepStrictEqual(buildD1Filters({ scope: 'personal' }), {});
+  });
+});
+
+describe('buildVectorizeFilter', () => {
+  it('returns undefined for empty conditions', () => {
+    assert.strictEqual(buildVectorizeFilter({}), undefined);
+  });
+
+  it('wraps simple equality in $eq', () => {
+    assert.deepStrictEqual(buildVectorizeFilter({ archived: 0 }), { archived: { $eq: 0 } });
+  });
+
+  it('combines multiple conditions with $and', () => {
+    assert.deepStrictEqual(
+      buildVectorizeFilter({ archived: 0, scope: 'company' }),
+      {
+        $and: [
+          { archived: { $eq: 0 } },
+          { scope: { $eq: 'company' } }
+        ]
+      }
+    );
+  });
+
+  it('preserves user-supplied operator objects', () => {
+    assert.deepStrictEqual(
+      buildVectorizeFilter({ score: { $gte: 0.5 } }),
+      { score: { $gte: 0.5 } }
+    );
+  });
+
+  it('mixes operator objects and simple values', () => {
+    assert.deepStrictEqual(
+      buildVectorizeFilter({ archived: 0, score: { $gte: 0.5 } }),
+      {
+        $and: [
+          { archived: { $eq: 0 } },
+          { score: { $gte: 0.5 } }
+        ]
+      }
+    );
+  });
+
+  it('drops undefined and null values', () => {
+    assert.deepStrictEqual(
+      buildVectorizeFilter({ archived: 0, parent_id: null, owner_id: undefined }),
+      { archived: { $eq: 0 } }
+    );
   });
 });

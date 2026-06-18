@@ -2,6 +2,18 @@ import { json } from "../constants.js";
 import { validateString, ValidationError, sanitizeScope, sanitizeOwnerId } from "../lib/validate.js";
 import { embedTexts, sha256, aiRun } from "../lib/embed.js";
 
+function isOperatorObject(value) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false;
+  return Object.keys(value).some(k => k.startsWith("$"));
+}
+
+export function buildVectorizeFilter(conditions) {
+  const entries = Object.entries(conditions).filter(([, v]) => v !== undefined && v !== null);
+  if (entries.length === 0) return undefined;
+  const predicates = entries.map(([k, v]) => isOperatorObject(v) ? { [k]: v } : { [k]: { $eq: v } });
+  return predicates.length === 1 ? predicates[0] : { $and: predicates };
+}
+
 export async function handleSearch(body, env) {
   try {
     const { query, top_k = 10, rerank = true, filter, parent_id, use_reranking, owner_id, scope, include_archived } = body;
@@ -47,8 +59,9 @@ export async function handleSearch(body, env) {
       metadataFilter.archived = 0;
     }
 
-    if (Object.keys(metadataFilter).length > 0) {
-      searchOpts.filter = metadataFilter;
+    const vectorizeFilter = buildVectorizeFilter(metadataFilter);
+    if (vectorizeFilter) {
+      searchOpts.filter = vectorizeFilter;
     }
 
     const matches = await env.VECTORIZE.query(queryVector, searchOpts);
@@ -108,7 +121,7 @@ export function buildD1Filters({ parent_id, owner_id, scope }) {
   return d1Filters;
 }
 
-async function hydrateWithD1(results, env, includeArchived = false, d1Filters = {}) {
+export async function hydrateWithD1(results, env, includeArchived = false, d1Filters = {}) {
   if (!env.DB || results.length === 0) return results;
 
   const ids = results.map(r => r.id);
