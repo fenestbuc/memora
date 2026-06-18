@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
+import { buildD1Filters } from './search.js';
 
 describe('search top_k normalization', () => {
   function normalizeTopK(top_k, shouldRerank) {
@@ -20,5 +21,47 @@ describe('search top_k normalization', () => {
   });
   it('caps rerank at 50', () => {
     assert.strictEqual(normalizeTopK(30, true), 50); // 30*3=90, min(90,50)=50
+  });
+});
+
+describe('buildD1Filters', () => {
+  it('maps personal scope with owner_id to owner_id filter', () => {
+    assert.deepStrictEqual(buildD1Filters({ scope: 'personal', owner_id: 'TestCrud' }), {
+      owner_id: 'TestCrud'
+    });
+  });
+
+  it('sanitizes owner_id', () => {
+    assert.deepStrictEqual(buildD1Filters({ scope: 'personal', owner_id: 'test@user!!' }), {
+      owner_id: 'testuser'
+    });
+  });
+
+  it('defaults missing scope to personal and applies owner_id', () => {
+    assert.deepStrictEqual(buildD1Filters({ owner_id: 'Alice' }), {
+      owner_id: 'Alice'
+    });
+  });
+
+  it('maps company scope to scope filter', () => {
+    assert.deepStrictEqual(buildD1Filters({ scope: 'company' }), {
+      scope: 'company'
+    });
+  });
+
+  it('ignores owner_id for company scope', () => {
+    assert.deepStrictEqual(buildD1Filters({ scope: 'company', owner_id: 'TestCrud' }), {
+      scope: 'company'
+    });
+  });
+
+  it('adds parent_id filter when provided', () => {
+    assert.deepStrictEqual(buildD1Filters({ parent_id: 'parent-1' }), {
+      parent_id: 'parent-1'
+    });
+  });
+
+  it('returns empty filters when only personal scope is given without owner_id', () => {
+    assert.deepStrictEqual(buildD1Filters({ scope: 'personal' }), {});
   });
 });
