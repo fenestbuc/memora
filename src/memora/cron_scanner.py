@@ -176,6 +176,21 @@ def due_jobs(company_dir: str | Path | None, now: datetime | None = None) -> lis
     return [job for job in iter_cron_jobs(company_dir) if cron_matches(now, job.schedule)]
 
 
+def build_cron_tree(company_dir: str | Path | None) -> dict[str, dict[str, Any]]:
+    """Build a nested tree of cron jobs grouped by member directory.
+
+    Returns a dictionary keyed by the directory name under ``crons/`` (for
+    example, ``engineer-alice``). Each entry contains the member's ``role``,
+    ``owner``, and ``jobs`` (list of :class:`CronJob`).
+    """
+    tree: dict[str, dict[str, Any]] = {}
+    for job in iter_cron_jobs(company_dir):
+        key = job.path.parent.name
+        entry = tree.setdefault(key, {"role": job.role, "owner": job.owner, "jobs": []})
+        entry["jobs"].append(job)
+    return tree
+
+
 def run_cron_job(job: CronJob, runner: Callable[[dict[str, Any]], Any]) -> Any:
     """Execute a single cron job by calling the provided runner."""
     payload = {

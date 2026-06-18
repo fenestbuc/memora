@@ -62,7 +62,7 @@ class HttpClient:
     def post(self, path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         """POST JSON *body* to *path*."""
         url = self._url(path)
-        data = json.dumps(body).encode("utf-8") if body else None
+        data = json.dumps(body).encode("utf-8") if body is not None else None
         return self._request(url, method="POST", data=data)
 
     # ------------------------------------------------------------------
