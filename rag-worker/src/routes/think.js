@@ -56,8 +56,11 @@ export async function handleThink(body, env) {
     const llm = model || env.DEFAULT_LLM;
     const response = await aiRun(env, llm, { messages });
 
+    const answer = response.response || "";
+    const structuredGaps = extractGaps(answer);
+
     return json({
-      answer: response.response,
+      answer,
       model: llm,
       sources: results.map((r) => ({
         id: r.id,
@@ -66,10 +69,31 @@ export async function handleThink(body, env) {
         score: r.rerank_score || r.vector_score || r.score,
         text_preview: (r.text || "").slice(0, 120),
       })),
-      gaps: [], // the LLM is expected to produce the gap section in the answer; left empty for structured clients
+      gaps: structuredGaps,
     });
   } catch (e) {
     if (e instanceof ValidationError) return json({ error: e.message, code: e.code }, 400);
     throw e;
   }
+}
+
+/**
+ * Extract a structured gaps list from the LLM answer text.
+ *
+ * The system prompt asks the model to end with a "## Gaps" section.  We parse
+ * the text after that heading into non-empty bullet lines.  If the section is
+ * missing or empty, we return an empty array so callers can still rely on the
+ * shape of the response.
+ */
+function extractGaps(answer) {
+  if (!answer) return [];
+  const marker = /##\s*Gaps/i;
+  const idx = answer.search(marker);
+  if (idx === -1) return [];
+
+  const section = answer.slice(idx + answer.slice(idx).match(marker)[0].length);
+  return section
+    .split(/\n/)
+    .map((line) => line.replace(/^\s*[-*•]|^\s*\d+[.)]\s*/, "").trim())
+    .filter((line) => line.length > 0 && !line.match(/^#{1,6}\s/));
 }
