@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { handleSearch } from './search.js';
+import { handleSearch, buildD1Filters } from './search.js';
 
 function fakeEnv(vector = new Array(768).fill(0.1)) {
   return {
@@ -81,5 +81,47 @@ describe('handleSearch scope metadata filtering', () => {
       owner_id: 'bob',
       archived: 0,
     });
+  });
+});
+
+describe('buildD1Filters', () => {
+  it('maps personal scope with owner_id to owner_id filter', () => {
+    assert.deepStrictEqual(buildD1Filters({ scope: 'personal', owner_id: 'TestCrud' }), {
+      owner_id: 'TestCrud'
+    });
+  });
+
+  it('sanitizes owner_id', () => {
+    assert.deepStrictEqual(buildD1Filters({ scope: 'personal', owner_id: 'test@user!!' }), {
+      owner_id: 'testuser'
+    });
+  });
+
+  it('defaults missing scope to personal and applies owner_id', () => {
+    assert.deepStrictEqual(buildD1Filters({ owner_id: 'Alice' }), {
+      owner_id: 'Alice'
+    });
+  });
+
+  it('maps company scope to scope filter', () => {
+    assert.deepStrictEqual(buildD1Filters({ scope: 'company' }), {
+      scope: 'company'
+    });
+  });
+
+  it('ignores owner_id for company scope', () => {
+    assert.deepStrictEqual(buildD1Filters({ scope: 'company', owner_id: 'TestCrud' }), {
+      scope: 'company'
+    });
+  });
+
+  it('adds parent_id filter when provided', () => {
+    assert.deepStrictEqual(buildD1Filters({ parent_id: 'parent-1' }), {
+      parent_id: 'parent-1'
+    });
+  });
+
+  it('returns empty filters when only personal scope is given without owner_id', () => {
+    assert.deepStrictEqual(buildD1Filters({ scope: 'personal' }), {});
   });
 });
