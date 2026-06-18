@@ -32,10 +32,16 @@ export async function handleSearch(body, env) {
     if (parent_id) metadataFilter.parent_id = parent_id;
 
     const safeScope = sanitizeScope(scope);
-    if (safeScope === "personal" && owner_id) {
-      metadataFilter.owner_id = sanitizeOwnerId(owner_id);
+    if (safeScope === "personal") {
+      metadataFilter.scope = "personal";
+      if (owner_id) {
+        metadataFilter.owner_id = sanitizeOwnerId(owner_id);
+      }
     } else if (safeScope === "company") {
       metadataFilter.scope = "company";
+      if (owner_id) {
+        metadataFilter.owner_id = sanitizeOwnerId(owner_id);
+      }
     }
 
     // Exclude archived facts from vector search unless explicitly requested
