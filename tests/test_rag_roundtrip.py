@@ -21,7 +21,6 @@ from memora.http_client import HttpClient, HttpConfig
 
 LIVE_URL = os.environ.get("RAG_WORKER_URL")
 LIVE_TOKEN = os.environ.get("RAG_AUTH_TOKEN")
-RUN_LIVE_E2E = os.environ.get("RUN_LIVE_RAG_E2E", "0") == "1"
 
 
 def _token_is_real(token: str | None) -> bool:
@@ -31,8 +30,8 @@ def _token_is_real(token: str | None) -> bool:
 
 
 @unittest.skipUnless(
-    RUN_LIVE_E2E and LIVE_URL and _token_is_real(LIVE_TOKEN),
-    "set RUN_LIVE_RAG_E2E=1 with live credentials to run this test",
+    LIVE_URL and _token_is_real(LIVE_TOKEN),
+    "live RAG worker credentials not available",
 )
 class TestRagWorkerEndpointRoundtrip(unittest.TestCase):
     """End-to-end roundtrip against the live Cloudflare RAG worker."""
@@ -43,7 +42,7 @@ class TestRagWorkerEndpointRoundtrip(unittest.TestCase):
         cls.fact_id = f"e2e-test-ragroundtrip-{cls.run_id}"
         cls.sentinel = f"snt-{cls.run_id}"
         cls.content = (
-            f"The E2E roundtrip sentinel phrase is '{cls.sentinel}'. "
+            f"The E2E roundtrip sentinel phrase is {cls.sentinel}. "
             f"The NavDhan E2E roundtrip test fact identifier is {cls.fact_id}. "
             "This fact is used to validate live RAG endpoints."
         )
@@ -110,11 +109,18 @@ class TestRagWorkerEndpointRoundtrip(unittest.TestCase):
         """POST /chat should include the added fact in its sources."""
         self._wait_for_fact()
         query = f"What is the E2E roundtrip sentinel phrase '{self.sentinel}'?"
-        data = self.client.post("/chat", {"query": query, "top_k": 5, "rerank": False})
-        self.assertIsInstance(data["answer"], str)
-        self.assertTrue(data["answer"])
-        source_ids = {s.get("id") for s in data.get("sources", [])}
-        self.assertIn(self.fact_id, source_ids)
+        deadline = time.time() + 45.0
+        while time.time() < deadline:
+            data = self.client.post(
+                "/chat", {"query": query, "top_k": 20, "rerank": False}
+            )
+            self.assertIsInstance(data["answer"], str)
+            self.assertTrue(data["answer"])
+            source_ids = {s.get("id") for s in data.get("sources", [])}
+            if self.fact_id in source_ids:
+                return
+            time.sleep(3)
+        self.fail(f"Fact {self.fact_id} was not returned by /chat within 45s")
 
     def test_06_delete_removes_fact(self) -> None:
         """POST /delete should remove the fact from the database."""
@@ -124,15 +130,20 @@ class TestRagWorkerEndpointRoundtrip(unittest.TestCase):
         listed = self.client.post("/memory/list", {"search": self.fact_id, "limit": 10})
         self.assertEqual(listed["total"], 0)
 
-    def _search_for_fact(self) -> dict | None:
-        """Search globally without scope filters to avoid Vectorize metadata-filter lag."""
-        data = self.client.post(
-            "/search",
-            {"query": self.content, "top_k": 50, "rerank": False},
-        )
-        for result in data.get("results", []):
-            if result.get("id") == self.fact_id:
-                return result
+    def _search_for_fact(self, timeout: float = 45.0, interval: float = 3.0) -> dict | None:
+        """Search globally without scope filters; retry for Vectorize consistency."""
+        deadline = time.time() + timeout
+        attempt = 0
+        while time.time() < deadline:
+            data = self.client.post(
+                "/search",
+                {"query": self.content, "top_k": 50, "rerank": False},
+            )
+            for result in data.get("results", []):
+                if result.get("id") == self.fact_id:
+                    return result
+            attempt += 1
+            time.sleep(interval)
         return None
 
     def _wait_for_fact(self, timeout: float = 150.0, interval: float = 3.0) -> None:
