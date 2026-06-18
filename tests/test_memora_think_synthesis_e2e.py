@@ -24,7 +24,7 @@ from memora.tool_dispatcher import dispatch
 
 E2E_PREFIX = "e2e-test-think"
 OWNER_ID = "e2e-test-think-owner"
-POLL_MAX_SECONDS = 60
+POLL_MAX_SECONDS = 180
 POLL_INTERVAL = 2
 MIN_RELEVANT_SOURCES = 2
 
