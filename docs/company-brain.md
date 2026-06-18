@@ -227,14 +227,14 @@ memora-sync
 | `memora-nightly` | Decay old facts, run evaluations, detect contradictions. |
 | `memora-weekly` | Generate a weekly digest. |
 | `memora-evals` | Run the routing/RAG evaluation suite. |
-| `memora doctor` | Health check: worker reachability, pending vector sync, queue depth, repo sync lag. |
+| `memora-doctor` | Health check: worker reachability, pending vector sync, queue depth, repo sync lag. |
 
 ### Keeping the brain healthy
 
 Run this once a day or put it in cron:
 
 ```bash
-memora doctor
+memora-doctor
 ```
 
 It prints a short report. If it reports pending vector syncs or a stale repo, run `memora-sync`.
@@ -312,7 +312,7 @@ You now have:
 - A shared company memory repo with per-person workspace folders.
 - Shared rule files that govern how every agent files and answers.
 - A synthesis command (`memora think`) that returns cited answers with gap analysis.
-- A health command (`memora doctor`) to catch drift early.
+- A health command (`memora-doctor`) to catch drift early.
 - A sync pipeline that keeps GitHub and the RAG backend aligned.
 
 Next steps:

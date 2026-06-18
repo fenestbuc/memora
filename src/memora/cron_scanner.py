@@ -62,6 +62,8 @@ def _field_matches(value: int, pattern: str) -> bool:
     if "/" in pattern:
         base, step = pattern.split("/", 1)
         step = int(step)
+        if step == 0:
+            return False
         if base == "*":
             return value % step == 0
         start, end = map(int, base.split("-"))
@@ -81,14 +83,47 @@ def _field_matches(value: int, pattern: str) -> bool:
     return value == int(pattern)
 
 
+def _expand_weekday(pattern: str) -> set[int]:
+    """Expand a cron weekday pattern into canonical 0=Sunday..6=Saturday values.
+
+    Both 0 and 7 are accepted as Sunday.
+    """
+    if pattern == "*":
+        return set(range(7))
+
+    step = 1
+    base = pattern
+    if "/" in pattern:
+        base, step_s = pattern.split("/", 1)
+        step = int(step_s)
+        if step == 0:
+            return set()
+
+    raw_values: set[int] = set()
+    for token in base.split(","):
+        if token == "*":
+            raw_values.update(range(8))  # include 7 so Sunday is mapped
+        elif "-" in token:
+            start, end = map(int, token.split("-", 1))
+            raw_values.update(range(start, end + 1))
+        else:
+            raw_values.add(int(token))
+
+    # Project 7 to 0
+    canonical = {v % 7 for v in raw_values}
+    # Apply step on sorted canonical values
+    if step > 1:
+        sorted_values = sorted(canonical)
+        canonical = {sorted_values[i] for i in range(0, len(sorted_values), step)}
+    return canonical
+
+
 def cron_matches(dt: datetime, expr: str) -> bool:
     """Return True if *dt* matches the five-field cron expression."""
     fields = expr.strip().split()
     if len(fields) != 5:
         return False
     minute, hour, day, month, weekday = fields
-    # Cron weekdays: 0 and 7 are Sunday, 1 is Monday. Normalize 7 to 0.
-    weekday = weekday.replace("7", "0")
     cron_weekday = (dt.weekday() + 1) % 7
 
     return (
@@ -96,7 +131,7 @@ def cron_matches(dt: datetime, expr: str) -> bool:
         and _field_matches(dt.hour, hour)
         and _field_matches(dt.day, day)
         and _field_matches(dt.month, month)
-        and _field_matches(cron_weekday, weekday)
+        and cron_weekday in _expand_weekday(weekday)
     )
 
 

@@ -14,6 +14,7 @@ import json
 import os
 import sqlite3
 import subprocess
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -34,8 +35,7 @@ def _load_queue_counts(hermes_home: Path) -> dict[str, int]:
     failed = 0
     for db_path in hermes_home.glob("memora_queue_*.db"):
         try:
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            with conn:
+            with closing(sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)) as conn:
                 row = conn.execute("SELECT COUNT(*) FROM queue").fetchone()
                 queued += row[0] if row else 0
                 row = conn.execute("SELECT COUNT(*) FROM failed_queue").fetchone()

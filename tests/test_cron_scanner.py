@@ -23,6 +23,23 @@ def test_cron_matches_weekday() -> None:
     assert cron_matches(dt, "0 9 * * 1") is False
 
 
+def test_cron_matches_weekday_sunday_zero_and_seven() -> None:
+    dt = datetime(2026, 6, 21, 9, 0, 0, tzinfo=timezone.utc)  # Sunday
+    assert cron_matches(dt, "0 9 * * 0") is True
+    assert cron_matches(dt, "0 9 * * 7") is True
+    # */7 should only match Sunday and not crash
+    assert cron_matches(dt, "0 9 * * */7") is True
+    dt_thu = datetime(2026, 6, 18, 9, 0, 0, tzinfo=timezone.utc)
+    assert cron_matches(dt_thu, "0 9 * * */7") is False
+
+
+def test_cron_matches_weekday_range_crosses_sunday() -> None:
+    # Monday=1 .. Sunday=0/7. Range 1-7 includes Sunday.
+    dt = datetime(2026, 6, 21, 9, 0, 0, tzinfo=timezone.utc)  # Sunday
+    assert cron_matches(dt, "0 9 * * 1-7") is True
+    assert cron_matches(dt, "0 9 * * 0-6") is True
+
+
 def test_iter_cron_jobs(tmp_path: Path) -> None:
     crons_dir = tmp_path / "crons" / "sales-alice"
     crons_dir.mkdir(parents=True)

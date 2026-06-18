@@ -189,7 +189,6 @@ Use `scope=company` when a fact should be visible to the whole team. Personal fa
 | `memora-migrate` | Cloudflare D1 schema migrations |
 | `memora-sync` | Sync facts from RAG, compile Markdown wiki, push to company repo |
 | `memora-doctor` | Health check: worker, pending vector sync, local queue, repo sync lag |
-| `memora think <query>` | Synthesized, cited answer with gaps (also a tool inside your agent) |
 
 ---
 

@@ -7,6 +7,8 @@ import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 from memora.doctor import run_doctor
 
 
@@ -17,11 +19,14 @@ def test_run_doctor_reports_unconfigured() -> None:
     assert code == 1
 
 
-def test_run_doctor_reports_healthy(tmp_path: Path) -> None:
+def test_run_doctor_reports_healthy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     company_dir = tmp_path / "company-memory"
     company_dir.mkdir()
     (company_dir / ".git").mkdir()
-    queue_db = tmp_path / "memora_queue_default.db"
+
+    hermes_home = tmp_path / ".hermes"
+    hermes_home.mkdir()
+    queue_db = hermes_home / "memora_queue_default.db"
     conn = sqlite3.connect(queue_db)
     conn.executescript(
         "CREATE TABLE queue (id INTEGER PRIMARY KEY);"
@@ -29,25 +34,22 @@ def test_run_doctor_reports_healthy(tmp_path: Path) -> None:
     )
     conn.close()
 
-    env = {
-        "RAG_WORKER_URL": "https://worker.test",
-        "RAG_AUTH_TOKEN": "token",
-        "HOME": str(tmp_path),
-    }
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("RAG_WORKER_URL", "https://worker.test")
+    monkeypatch.setenv("RAG_AUTH_TOKEN", "token")
 
     mock_health = {"status": "ok", "version": "1.2.0", "models": {"llm": "test"}}
-    mock_stats = {"total": 100, "pending_vector_sync": 5}
+    mock_stats = {"total": 100, "pending_vector_sync": 0}
 
-    with patch.dict("os.environ", env, clear=True):
-        with patch("memora.doctor.resolve_company_memory_dir", return_value=company_dir):
-            with patch(
-                "memora.doctor.HttpClient",
-                return_value=MagicMock(
-                    get=MagicMock(side_effect=[mock_health, mock_stats]),
-                    post=MagicMock(return_value={}),
-                ),
-            ):
-                code = run_doctor(json_output=True)
+    with patch("memora.doctor.resolve_company_memory_dir", return_value=company_dir):
+        with patch(
+            "memora.doctor.HttpClient",
+            return_value=MagicMock(
+                get=MagicMock(side_effect=[mock_health, mock_stats]),
+                post=MagicMock(return_value={}),
+            ),
+        ):
+            code = run_doctor(json_output=True)
 
     assert code == 0
 

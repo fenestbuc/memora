@@ -8,13 +8,14 @@ full provider stack.
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
 
 def _slug(value: str) -> str:
-    """Return a lowercased, hyphen-safe slug."""
-    return value.strip().lower().replace(" ", "-")
+    """Return a lowercased, filesystem-safe hyphen slug."""
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
 
 
 def build_member_files(profile: dict[str, Any]) -> dict[str, str]:

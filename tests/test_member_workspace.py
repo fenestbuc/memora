@@ -35,3 +35,12 @@ def test_build_member_files_slugifies_spaces() -> None:
 
     assert "members/product-manager-bob-smith/USER.md" in files
     assert any(p.endswith(".json") for p in files)
+
+
+def test_build_member_files_rejects_path_traversal() -> None:
+    profile = {"first_name": "Bob/../../etc", "role": "../admin", "company_github_repo": ""}
+    files = build_member_files(profile)
+
+    for path in files:
+        assert ".." not in path
+        assert path.startswith("members/")
