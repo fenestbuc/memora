@@ -49,14 +49,21 @@ def generate_company_pr(
         file_path.write_text(file_content, encoding="utf-8")
         written_paths.append(file_path.relative_to(repo))
 
-    # 1. Create and check out a new branch.
+    # 1. Check out the base branch so the new branch is created from it.
+    subprocess.run(
+        ["git", "checkout", base_branch],
+        cwd=repo,
+        check=True,
+    )
+
+    # 2. Create and check out a new branch.
     subprocess.run(
         ["git", "checkout", "-b", branch_name],
         cwd=repo,
         check=True,
     )
 
-    # 2. Stage all files.
+    # 3. Stage all files.
     for rel_path in written_paths:
         subprocess.run(
             ["git", "add", str(rel_path)],
@@ -64,21 +71,21 @@ def generate_company_pr(
             check=True,
         )
 
-    # 3. Commit.
+    # 4. Commit.
     subprocess.run(
         ["git", "commit", "-m", title],
         cwd=repo,
         check=True,
     )
 
-    # 4. Push the branch to the remote.
+    # 5. Push the branch to the remote.
     subprocess.run(
         ["git", "push", "-u", "origin", branch_name],
         cwd=repo,
         check=True,
     )
 
-    # 5. Open the PR via gh CLI.
+    # 6. Open the PR via gh CLI.
     body_paths = ", ".join(str(p) for p in written_paths)
     subprocess.run(
         [

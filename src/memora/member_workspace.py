@@ -30,6 +30,8 @@ def build_member_files(profile: dict[str, Any]) -> dict[str, str]:
     first_name = profile.get("first_name", "Unknown")
     role = profile.get("role", "Unknown")
     repo = profile.get("company_github_repo", "")
+    email = profile.get("email")
+    email_line = f"\n- **Email:** {email}" if email else ""
 
     base = f"members/{_slug(role)}-{_slug(first_name)}"
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -40,7 +42,7 @@ def build_member_files(profile: dict[str, Any]) -> dict[str, str]:
 
 ## Role and focus
 
-- **Role:** {role}
+- **Role:** {role}{email_line}
 - **Top priorities:** (update as you go)
 - **Preferred answer style:** (terse / detailed / bullet-rich)
 

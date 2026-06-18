@@ -90,7 +90,7 @@ async def memory_sync_loop():
 
     base_url = os.environ.get("RAG_WORKER_URL", "").rstrip("/")
     token = os.environ.get("RAG_AUTH_TOKEN", "")
-    interval_seconds = 900  # 15 minutes
+    interval_seconds = float(os.environ.get("MEMORA_SYNC_INTERVAL_SECONDS", "900"))
 
     if not base_url or not token:
         logger.warning("RAG_WORKER_URL or RAG_AUTH_TOKEN not set; memory sync loop is disabled")
@@ -98,7 +98,7 @@ async def memory_sync_loop():
             await asyncio.sleep(interval_seconds)
 
     client = HttpClient(HttpConfig(base_url=base_url, token=token))
-    logger.info("Background memory sync loop started")
+    logger.info("Background memory sync loop started (interval=%ss)", interval_seconds)
 
     while True:
         try:
