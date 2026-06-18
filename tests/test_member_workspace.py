@@ -10,7 +10,12 @@ from memora.member_workspace import build_member_files
 
 
 def test_build_member_files_scaffolds_workspace() -> None:
-    profile = {"first_name": "Alice", "role": "Sales", "company_github_repo": "https://example.com/repo"}
+    profile = {
+        "first_name": "Alice",
+        "role": "Sales",
+        "company_github_repo": "https://example.com/repo",
+        "email": "alice@example.com",
+    }
     files = build_member_files(profile)
 
     assert "members/sales-alice.json" in files
@@ -23,10 +28,12 @@ def test_build_member_files_scaffolds_workspace() -> None:
     metadata = json.loads(files["members/sales-alice.json"])
     assert metadata["first_name"] == "Alice"
     assert metadata["role"] == "Sales"
+    assert metadata["email"] == "alice@example.com"
 
     user_md = files["members/sales-alice/USER.md"]
     assert "Alice" in user_md
     assert "Sales" in user_md
+    assert "alice@example.com" in user_md
 
 
 def test_build_member_files_slugifies_spaces() -> None:
