@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from memora.cron_scanner import cron_matches, due_jobs, iter_cron_jobs, run_cron_job
+from memora.cron_scanner import (
+    CronJob,
+    build_cron_tree,
+    cron_matches,
+    due_jobs,
+    iter_cron_jobs,
+    run_cron_job,
+)
 
 
 def test_cron_matches_exact_time() -> None:
@@ -73,7 +80,6 @@ def test_run_cron_job_calls_runner() -> None:
     assert len(jobs) == 0
 
     # Construct a job manually
-    from memora.cron_scanner import CronJob
     job = CronJob(path=Path("/tmp/digest.md"), owner="bob", schedule="0 9 * * *", prompt="hello")
 
     calls: list[dict] = []
@@ -85,3 +91,21 @@ def test_run_cron_job_calls_runner() -> None:
     assert calls[0]["query"] == "hello"
     assert calls[0]["owner_id"] == "bob"
     assert calls[0]["scope"] == "company"
+
+
+def test_build_cron_tree_groups_by_member_directory(tmp_path: Path) -> None:
+    crons_dir = tmp_path / "crons" / "engineer-alice"
+    crons_dir.mkdir(parents=True)
+    (crons_dir / "daily.md").write_text(
+        '---\nschedule: "* * * * *"\nowner: Alice\nprompt: Summarize yesterday\'s facts\n---\n',
+        encoding="utf-8",
+    )
+
+    tree = build_cron_tree(tmp_path)
+    assert "engineer-alice" in tree
+    node = tree["engineer-alice"]
+    assert node["role"] == "engineer"
+    assert node["owner"] == "Alice"
+    assert len(node["jobs"]) == 1
+    assert node["jobs"][0].path == crons_dir / "daily.md"
+    assert node["jobs"][0].schedule == "* * * * *"

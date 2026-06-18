@@ -49,5 +49,5 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["src"]
 markers = [
-    "e2e: marks tests that hit the live RAG worker",
+    "e2e: tests that call the live deployed RAG worker",
 ]
