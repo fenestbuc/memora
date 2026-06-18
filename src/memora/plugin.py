@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from .http_client import HttpClient, HttpConfig
+from .company_rules import load_company_rules, resolve_company_memory_dir
 from .fact_extractor import extract_facts as _extract_facts_module
 from .memory_mirror import write as _mirror_write
 from .tool_dispatcher import dispatch, search_cache_key
@@ -234,6 +235,9 @@ class MemoraProvider(MemoryProvider):
         self._memory_dir = Path(self._config.get("memory_dir", str(Path.home() / "hermes-workspace" / "memory")))
         self._memory_dir.mkdir(parents=True, exist_ok=True)
 
+        # Company memory directory (shared rule files loaded into system prompt)
+        self._company_memory_dir = resolve_company_memory_dir(self._config)
+
         # Auto-ingest flag gates sync_turn
         self._auto_ingest = self._config.get("auto_ingest", True)
 
@@ -385,12 +389,16 @@ class MemoraProvider(MemoryProvider):
             conn.close()
 
     def system_prompt_block(self) -> str:
-        return (
+        base = (
             "You have access to a persistent long-term memory via the memora_* tools. "
             "Use memora_search to recall past context before answering. "
             "After learning something important, DO NOT use the default memory tool — ALWAYS use memora_add to persist it directly to the RAG backend. "
             "When using memora_add, you MUST explicitly categorize the fact using precise tags (e.g., projects, strategy, business, integrations, user) rather than dumping it into the default 'memory' bucket."
         )
+        rules = load_company_rules(getattr(self, "_company_memory_dir", None))
+        if not rules:
+            return base
+        return f"{base}\n\n{rules}"
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
         self._metrics["prefetch_calls"] += 1

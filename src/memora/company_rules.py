@@ -12,6 +12,7 @@ from typing import Any
 
 COMPANY_RULE_FILES = [
     "_brain-filing-rules.md",
+    "_company-memory-rules.md",
     "_output-rules.md",
     "_excluded-people.md",
     "_operating-rules.md",

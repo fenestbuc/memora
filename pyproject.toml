@@ -48,3 +48,6 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "e2e: tests that call the live deployed RAG worker",
+]
