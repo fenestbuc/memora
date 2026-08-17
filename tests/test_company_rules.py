@@ -73,7 +73,8 @@ def test_resolve_company_memory_dir_defaults(tmp_path: Path, monkeypatch: pytest
     assert resolve_company_memory_dir({}) == default
 
 
-def test_resolve_company_memory_dir_no_default() -> None:
+def test_resolve_company_memory_dir_no_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
     assert resolve_company_memory_dir({}) is None
 
 
