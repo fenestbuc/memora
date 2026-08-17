@@ -42,11 +42,11 @@ class TestInit:
         assert cursor.fetchone() is not None
         conn.close()
 
-    def test_default_db_path(self) -> None:
-        """When no path is given the cache should fall back to a default location."""
+    def test_default_db_path_is_profile_cache(self, tmp_path: pathlib.Path, monkeypatch) -> None:
+        """Default cache state belongs under HERMES_HOME, never the CWD."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
         cache = SqliteL1Cache()
-        assert cache.db_path is not None
-        assert isinstance(cache.db_path, pathlib.Path)
+        assert cache.db_path == tmp_path / "hermes-home" / "cache" / "memora" / "l1.db"
 
 
 class TestSetAndGet:

@@ -319,15 +319,10 @@ class MemoraProvider(MemoryProvider):
         pass
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        if not self._auto_ingest or self._queue is None:
-            return
-        user_stripped = user_content.strip()
-        if len(user_stripped) >= 15 and not _TRIVIAL_RE.match(user_stripped):
-            if self._queue.add("memory", f"User: {user_content[:500]}"):
-                self._metrics["facts_queued"] += 1
-        if len(assistant_content.strip()) >= 15:
-            if self._queue.add("memory", f"Assistant: {assistant_content[:500]}"):
-                self._metrics["facts_queued"] += 1
+        # Raw turns are transcripts, not durable facts. Durable extraction is
+        # handled at session boundaries by extract_facts(), and explicit facts
+        # are written through memora_add with a precise category and scope.
+        return
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         return _TOOL_SCHEMAS
@@ -342,6 +337,8 @@ class MemoraProvider(MemoryProvider):
             return self._handle_reassign(args)
 
         path, body = dispatch(tool_name, args, owner_id=self._owner_id)
+        if self._http is None:
+            return json.dumps({"error": "Memora provider is not initialized"})
 
         # Cache logic
         cache_key = None
@@ -359,6 +356,19 @@ class MemoraProvider(MemoryProvider):
                 result = self._http.get(path)
             else:
                 result = self._http.post(path, body)
+            if (
+                tool_name == "memora_search"
+                and not result.get("results")
+                and "scope" not in args
+                and body is not None
+                and body.get("owner_id")
+            ):
+                # The pre-owner migration corpus has no owner_id metadata.
+                # Retry unscoped so legacy facts remain searchable while new
+                # personal writes continue to use explicit ownership.
+                legacy_body = dict(body)
+                legacy_body.pop("owner_id", None)
+                result = self._http.post(path, legacy_body)
             if tool_name == "memora_search":
                 self._metrics["search_calls"] += 1
                 if cache_key and "error" not in result:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sqlite3
 import time
@@ -29,7 +30,8 @@ class SqliteL1Cache:
                 default file in the current working directory is used.
         """
         if db_path is None:
-            db_path = pathlib.Path("./memora_l1_cache.db")
+            hermes_home = pathlib.Path(os.environ.get("HERMES_HOME", pathlib.Path.home() / ".hermes"))
+            db_path = hermes_home / "cache" / "memora" / "l1.db"
         self.db_path = pathlib.Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._stats = CacheStats()

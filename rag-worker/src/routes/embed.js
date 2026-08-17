@@ -5,8 +5,8 @@ import { embedTexts } from "../lib/embed.js";
 export async function handleEmbed(body, env) {
   try {
     const { text } = body;
-    validateArray(text || [body.text], "text");
     const inputs = Array.isArray(text) ? text : [text];
+    validateArray(inputs, "text");
     if (inputs.length > MAX_TEXTS_PER_REQUEST) {
       return json({ error: "Max 100 texts per request", code: "BATCH_TOO_LARGE" }, 400);
     }

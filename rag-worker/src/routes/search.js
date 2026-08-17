@@ -10,7 +10,7 @@ export async function handleSearch(body, env) {
 
     const shouldRerank = use_reranking !== undefined ? use_reranking : rerank;
 
-    const cacheKey = `search:${await sha256(JSON.stringify({ query, top_k, rerank: shouldRerank, filter, parent_id, owner_id, scope }))}`;
+    const cacheKey = `search:v2:${await sha256(JSON.stringify({ query, top_k, rerank: shouldRerank, filter, parent_id, owner_id, scope }))}`;
     if (env.CACHE) {
       const cached = await env.CACHE.get(cacheKey, "json");
       if (cached) return json({ ...cached, cached: true });
@@ -32,20 +32,17 @@ export async function handleSearch(body, env) {
     if (parent_id) metadataFilter.parent_id = parent_id;
 
     const safeScope = sanitizeScope(scope);
-    if (safeScope === "personal") {
-      metadataFilter.scope = "personal";
-      if (owner_id) {
-        metadataFilter.owner_id = sanitizeOwnerId(owner_id);
-      }
-    } else if (safeScope === "company") {
-      metadataFilter.scope = "company";
-      if (owner_id) {
-        metadataFilter.owner_id = sanitizeOwnerId(owner_id);
-      }
-    }
+    // Do not push owner/scope filters into Vectorize. This index predates
+    // metadata indexes for those fields, and Cloudflare returns zero matches
+    // when a filter targets an unindexed property. Fetch a wider candidate set
+    // and enforce access scope after D1 hydration instead.
+    const needsAccessFilter = Boolean(owner_id || safeScope === "company");
 
-    // Exclude archived facts from vector search unless explicitly requested
-    if (!include_archived) {
+    // Only add this metadata filter when explicitly requested. Legacy vectors
+    // predate the archived metadata field and disappear from Vectorize queries
+    // whenever archived=0 is applied implicitly. D1 hydration still excludes
+    // archived rows from the returned result set by default.
+    if (include_archived === false) {
       metadataFilter.archived = 0;
     }
 
@@ -53,10 +50,14 @@ export async function handleSearch(body, env) {
       searchOpts.filter = metadataFilter;
     }
 
+    if (needsAccessFilter) {
+      searchOpts.topK = 50;
+    }
+
     const matches = await env.VECTORIZE.query(queryVector, searchOpts);
 
     if (!shouldRerank || !matches.matches || matches.matches.length === 0) {
-      let finalResults = (matches.matches || []).slice(0, top_k).map(m => ({
+      let finalResults = (matches.matches || []).map(m => ({
         id: m.id,
         score: m.score,
         text: m.metadata?.text || "",
@@ -64,9 +65,11 @@ export async function handleSearch(body, env) {
       }));
 
       finalResults = await hydrateWithD1(finalResults, env, include_archived);
+      finalResults = filterAccessResults(finalResults, owner_id, safeScope);
+      finalResults = finalResults.slice(0, numericTopK);
 
       const result = { results: finalResults };
-      if (env.CACHE) env.CACHE.put(cacheKey, JSON.stringify(result), { expirationTtl: 3600 });
+      if (env.CACHE && finalResults.length > 0) env.CACHE.put(cacheKey, JSON.stringify(result), { expirationTtl: 300 });
       return json(result);
     }
 
@@ -84,18 +87,30 @@ export async function handleSearch(body, env) {
         text: candidateTexts[i],
         metadata: matches.matches[i].metadata
       }))
-      .sort((a, b) => b.rerank_score - a.rerank_score)
-      .slice(0, top_k);
+      .sort((a, b) => b.rerank_score - a.rerank_score);
 
-    const finalResults = await hydrateWithD1(baseResults, env, include_archived);
+    let finalResults = await hydrateWithD1(baseResults, env, include_archived);
+    finalResults = filterAccessResults(finalResults, owner_id, safeScope);
+    finalResults = finalResults.slice(0, numericTopK);
 
     const resultData = { results: finalResults };
-    if (env.CACHE) env.CACHE.put(cacheKey, JSON.stringify(resultData), { expirationTtl: 3600 });
+    if (env.CACHE && finalResults.length > 0) env.CACHE.put(cacheKey, JSON.stringify(resultData), { expirationTtl: 300 });
     return json(resultData);
   } catch (e) {
     if (e instanceof ValidationError) return json({ error: e.message, code: e.code }, 400);
     throw e;
   }
+}
+
+function filterAccessResults(results, ownerId, scope) {
+  if (scope === "company") {
+    return results.filter(r => (r.scope ?? r.metadata?.scope) === "company");
+  }
+  if (ownerId) {
+    const safeOwner = sanitizeOwnerId(ownerId);
+    return results.filter(r => (r.owner_id ?? r.metadata?.owner_id) === safeOwner);
+  }
+  return results;
 }
 
 async function hydrateWithD1(results, env, includeArchived = false) {

@@ -53,6 +53,7 @@ function makeFact(id, text, metadata = {}) {
       category: 'projects',
       created_at: '2026-01-01T00:00:00Z',
       owner_id: 'e2e-test-owner',
+      scope: 'personal',
       ...metadata,
     },
   };
