@@ -184,9 +184,10 @@ def test_chat(client: HttpClient) -> None:
     resp = client.post(
         "/chat",
         {
-            "query": CHAT_QUERY,
-            "top_k": 5,
+            "query": SEARCH_QUERY,
+            "top_k": 50,
             "system": "Answer the question using the provided context. Keep it concise.",
+            "rerank": False,
         },
     )
     answer = resp.get("answer", "")
