@@ -34,3 +34,23 @@ reports/
 
 # macOS
 .DS_Store
+# Local Hermes and Cloudflare development state
+.hermes/
+**/.dev.vars
+**/.wrangler/
+rag-worker/wrangler.toml
+rag-worker/debug_embed.mjs
+run_install.exp
+
+# One-off diagnostics and probes
+scripts/cache_test.py
+scripts/chat_inspect.py
+scripts/check_cache.py
+scripts/diagnose_search.py
+scripts/exact_test.py
+scripts/natural_test.py
+scripts/qa_test.py
+scripts/rerank_inspect.py
+scripts/search_inspect.py
+scripts/static_q_test.py
+
