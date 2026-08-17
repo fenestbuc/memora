@@ -1,84 +1,134 @@
-import json
-import os
-from pathlib import Path
-from collections import defaultdict
-from typing import Dict, List
+"""Build a navigable Markdown wiki from exported Memora JSONL facts."""
 
-def build_wiki(repo_dir: str):
-    """
-    Reads all .jsonl facts in repo_dir/facts/ and generates 
-    a comprehensive Markdown wiki in repo_dir/wiki/.
-    """
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+
+def _display_source(fact: dict[str, Any]) -> str:
+    source = fact.get("source_file") or fact.get("source_session") or "Memora"
+    source = str(source).strip()
+    if source.startswith("/"):
+        source = Path(source).name
+    return source or "Memora"
+
+
+def _fact_date(fact: dict[str, Any]) -> str:
+    value = fact.get("updated_at") or fact.get("created_at") or ""
+    return str(value)[:10] or "Undated"
+
+
+def build_wiki(repo_dir: str) -> dict[str, int]:
+    """Render category pages, a wiki index, and the repository README."""
     repo_path = Path(repo_dir)
     facts_dir = repo_path / "facts"
     wiki_dir = repo_path / "wiki"
     wiki_dir.mkdir(exist_ok=True, parents=True)
-    
+
     if not facts_dir.exists():
-        print(f"Facts directory {facts_dir} not found.")
-        return
+        raise FileNotFoundError(f"Facts directory {facts_dir} not found")
 
-    # Categorized facts
-    facts_by_category: Dict[str, List[dict]] = defaultdict(list)
-    
-    for jsonl_file in facts_dir.glob("*.jsonl"):
-        cat = jsonl_file.stem
-        with open(jsonl_file, "r", encoding="utf-8") as f:
-            for line in f:
-                if line.strip():
-                    try:
-                        facts_by_category[cat].append(json.loads(line))
-                    except json.JSONDecodeError:
-                        pass
-                        
-    # Sort facts chronologically if created_at exists, else leave as is
-    for cat in facts_by_category:
-        facts_by_category[cat].sort(key=lambda x: x.get("created_at", ""))
+    facts_by_category: dict[str, list[dict[str, Any]]] = {}
+    for jsonl_file in sorted(facts_dir.glob("*.jsonl")):
+        rows: list[dict[str, Any]] = []
+        for line_number, line in enumerate(jsonl_file.read_text(encoding="utf-8").splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
+                fact = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid JSONL in {jsonl_file}:{line_number}: {exc}") from exc
+            if str(fact.get("content") or "").strip():
+                rows.append(fact)
+        if rows:
+            rows.sort(
+                key=lambda fact: str(fact.get("updated_at") or fact.get("created_at") or ""),
+                reverse=True,
+            )
+            facts_by_category[jsonl_file.stem] = rows
 
-    # Generate Markdown for each category
-    index_links = []
-    
-    for cat, facts in facts_by_category.items():
-        if not facts:
-            continue
-            
-        md_file = wiki_dir / f"{cat}.md"
-        title = cat.replace("_", " ").title()
-        
-        with open(md_file, "w", encoding="utf-8") as f:
-            f.write(f"# {title}\n\n")
-            f.write(f"*Auto-generated comprehensive memory for {title}.*\n\n")
-            
-            for fact in facts:
-                content = fact.get("content", "").strip()
-                date_str = fact.get("created_at", "")[:10]
-                source = fact.get("source", "system")
-                
-                if date_str:
-                    f.write(f"### {date_str} (Source: {source})\n")
-                else:
-                    f.write(f"### Source: {source}\n")
-                    
-                f.write(f"{content}\n\n---\n\n")
-                
-        index_links.append(f"- [{title}](wiki/{cat}.md) ({len(facts)} facts)")
+    expected_pages = {wiki_dir / f"{category}.md" for category in facts_by_category}
+    expected_pages.add(wiki_dir / "index.md")
+    for stale in wiki_dir.glob("*.md"):
+        if stale not in expected_pages:
+            stale.unlink()
 
-    # Update or Create README.md at repo root
-    readme_path = repo_path / "README.md"
-    readme_content = "# Kubar Labs Comprehensive Brain\n\n"
-    readme_content += "This repository serves as the central, synced brain for Kubar Labs.\n\n"
-    readme_content += "## Wiki Index\n\n"
-    readme_content += "\n".join(sorted(index_links)) + "\n\n"
-    readme_content += "## How it works\n\n"
-    readme_content += "Facts are continuously synchronized as `.jsonl` files in `facts/` by the Memora daemon, to prevent git conflicts. "
-    readme_content += "The `wiki_builder.py` script automatically compiles these facts into the human-readable Markdown files found in `wiki/`."
-    
-    with open(readme_path, "w", encoding="utf-8") as f:
-        f.write(readme_content)
-        
+    index_lines = [
+        "# Company Brain Index",
+        "",
+        "A human-readable view of durable Kubar Labs knowledge synchronized from Memora.",
+        "",
+        "## Domains",
+        "",
+    ]
+
+    total = 0
+    for category, facts in facts_by_category.items():
+        title = category.replace("_", " ").replace("-", " ").title()
+        page = wiki_dir / f"{category}.md"
+        lines = [
+            f"# {title}",
+            "",
+            f"{len(facts)} durable facts, newest first.",
+            "",
+        ]
+        for fact in facts:
+            fact_id = str(fact.get("id") or "unknown")
+            lines.extend(
+                [
+                    f"## {_fact_date(fact)}",
+                    "",
+                    str(fact.get("content") or "").strip(),
+                    "",
+                    f"Source: {_display_source(fact)}  ",
+                    f"Fact ID: `{fact_id}`",
+                    "",
+                ]
+            )
+        page.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        index_lines.append(f"- [{title}]({category}.md), {len(facts)} facts")
+        total += len(facts)
+
+    index_lines.extend(
+        [
+            "",
+            "## Data policy",
+            "",
+            "- This repository contains durable company knowledge, not raw conversations.",
+            "- Explicitly personal facts, test data, and agent transcripts are excluded.",
+            "- JSONL in `facts/` is the machine-readable source. Markdown in `wiki/` is generated.",
+        ]
+    )
+    (wiki_dir / "index.md").write_text("\n".join(index_lines).rstrip() + "\n", encoding="utf-8")
+
+    readme_lines = [
+        "# Kubar Labs Company Brain",
+        "",
+        f"{total} durable facts across {len(facts_by_category)} domains, synchronized from Memora.",
+        "",
+        "Start with the [Company Brain Index](wiki/index.md).",
+        "",
+        "## Structure",
+        "",
+        "- `facts/`: machine-readable JSONL grouped by knowledge domain.",
+        "- `wiki/`: generated Markdown pages for human review and navigation.",
+        "- Root rule files, when present, define filing and output policy for every Memora-powered agent.",
+        "",
+        "## Sync",
+        "",
+        "Run `memora-sync /home/yash/hermes-workspace/company-memory` from an authenticated Memora environment.",
+        "The sync filters private and low-signal records, deduplicates content, rebuilds the wiki, commits, and pushes.",
+    ]
+    (repo_path / "README.md").write_text("\n".join(readme_lines).rstrip() + "\n", encoding="utf-8")
+
     print(f"Wiki generated successfully in {wiki_dir}")
+    return {"categories": len(facts_by_category), "facts": total}
+
 
 if __name__ == "__main__":
     import sys
-    repo = sys.argv[1] if len(sys.argv) > 1 else str(Path.home() / "hermes-workspace" / "kubarlabs-memory")
-    build_wiki(repo)
+
+    target = sys.argv[1] if len(sys.argv) > 1 else str(Path.home() / "hermes-workspace" / "company-memory")
+    build_wiki(target)

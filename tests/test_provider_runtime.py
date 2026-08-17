@@ -9,6 +9,8 @@ from typing import cast
 from memora.http_client import HttpClient
 from memora.provider import MemoraProvider
 from memora.queue import FactQueue
+from memora.repo_sync import _collect_export_facts
+from memora.wiki_builder import build_wiki
 
 
 class _HttpStub:
@@ -80,3 +82,81 @@ def test_sync_turn_does_not_store_raw_transcript_snippets() -> None:
     )
 
     assert queue.added == []
+
+
+def test_company_export_filters_private_and_low_signal_categories() -> None:
+    pages = [
+        {
+            "facts": [
+                {"id": "b1", "category": "business", "content": "Kubar charges lenders a success fee.", "scope": None},
+                {"id": "m1", "category": "memory", "content": "Assistant: raw transcript", "scope": "personal"},
+                {"id": "u1", "category": "user", "content": "Private profile detail", "scope": "personal"},
+                {"id": "t1", "category": "test", "content": "Synthetic test fact", "scope": "company"},
+            ]
+        },
+        {"facts": []},
+    ]
+
+    facts = _collect_export_facts(lambda: pages.pop(0), max_pages=3)
+
+    assert list(facts) == ["business"]
+    assert facts["business"][0]["id"] == "b1"
+
+
+def test_company_export_deduplicates_normalized_content() -> None:
+    pages = [
+        {
+            "facts": [
+                {"id": "p1", "category": "projects", "content": "NavDhan is the credit layer.", "updated_at": "2026-01-01"},
+                {"id": "p2", "category": "projects", "content": "  NavDhan is the credit layer.  ", "updated_at": "2026-02-01"},
+            ]
+        },
+        {"facts": []},
+    ]
+
+    facts = _collect_export_facts(lambda: pages.pop(0), max_pages=3)
+
+    assert len(facts["projects"]) == 1
+    assert facts["projects"][0]["id"] == "p2"
+
+
+def test_company_export_rejects_credential_bearing_content() -> None:
+    pages = [
+        {
+            "facts": [
+                {"id": "i1", "category": "integrations", "content": "Notion API token: ntn_live_secret_value", "scope": None},
+                {"id": "i2", "category": "integrations", "content": "Notion integration is active and used for CMS sync.", "scope": None},
+            ]
+        },
+        {"facts": []},
+    ]
+
+    facts = _collect_export_facts(lambda: pages.pop(0), max_pages=3)
+
+    assert [fact["id"] for fact in facts["integrations"]] == ["i2"]
+
+
+def test_wiki_builder_creates_index_and_sanitized_category_pages(tmp_path: Path) -> None:
+    facts = tmp_path / "facts"
+    facts.mkdir()
+    (facts / "business.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "b1",
+                "category": "business",
+                "content": "Kubar charges lenders a success fee.",
+                "source_file": "/home/yash/private/business.md",
+                "updated_at": "2026-08-17 10:00:00",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    summary = build_wiki(str(tmp_path))
+
+    assert summary == {"categories": 1, "facts": 1}
+    assert (tmp_path / "wiki" / "index.md").exists()
+    page = (tmp_path / "wiki" / "business.md").read_text()
+    assert "/home/yash" not in page
+    assert "business.md" in page
